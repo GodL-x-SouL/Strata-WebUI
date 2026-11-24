@@ -56,6 +56,38 @@ function request(base, path, { method = 'GET', body, headers = {} } = {}) {
   });
 }
 
+function streamRequest(base, path, { method = 'GET', body, headers = {} } = {}) {
+  const url = new URL(path, base);
+  const chunks = [];
+  let buffered = '', settled = false, resolveResponse, rejectResponse, resolveDone, rejectDone, resolveFirstLine;
+  const response = new Promise((resolve, reject) => { resolveResponse = resolve; rejectResponse = reject; });
+  const done = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
+  const firstLine = new Promise(resolve => { resolveFirstLine = resolve; });
+  done.catch(() => {});
+  const req = http.request({
+    hostname: '127.0.0.1', port: url.port, path: url.pathname + url.search, method,
+    headers: { ...headers, ...(body === undefined ? {} : { 'content-length': Buffer.byteLength(body) }) },
+  }, res => {
+    settled = true;
+    res.on('data', chunk => {
+      chunks.push(chunk);
+      buffered += chunk.toString();
+      const newline = buffered.indexOf('\n');
+      if (newline >= 0) resolveFirstLine(buffered.slice(0, newline));
+    });
+    res.on('end', () => { resolveDone(Buffer.concat(chunks).toString()); resolveFirstLine(''); });
+    res.on('aborted', () => rejectDone(new Error('aborted')));
+    res.on('error', rejectDone);
+    resolveResponse(res);
+  });
+  req.on('error', error => {
+    if (!settled) { settled = true; rejectResponse(error); }
+    rejectDone(error);
+  });
+  req.end(body);
+  return { response, done, firstLine, abort: () => req.destroy(), text: () => Buffer.concat(chunks).toString() };
+}
+
 function sessionHeaders(base) {
   return { origin: base };
 }
@@ -147,7 +179,12 @@ test('Studio rejects CSRF and exposes only manager routes and operation kinds', 
     assert.equal((await request(base, '/api/serving', { method: 'PATCH', body: '{}', headers: { cookie, origin: 'https://evil.example' } })).status, 403);
     assert.equal((await request(base, '/api/app/quit', { method: 'POST', body: '{}', headers: { ...sessionHeaders(base), cookie } })).status, 404);
     assert.equal((await request(base, '/api/control/ui', { method: 'POST', body: '{}', headers: { ...sessionHeaders(base), cookie } })).status, 404);
-    assert.equal((await request(base, '/api/chats', { headers: { cookie } })).status, 404);
+    assert.equal((await request(base, '/api/chats/import', { method: 'POST', body: '{}', headers: { ...sessionHeaders(base), cookie, 'content-type': 'application/json' } })).status, 404);
+    assert.equal((await request(base, '/api/chats/s_host', { headers: { cookie } })).status, 404);
+    assert.equal((await request(base, '/api/chats', { method: 'POST', body: '{}', headers: { ...sessionHeaders(base), cookie, 'content-type': 'application/json' } })).status, 404);
+    assert.equal((await request(base, '/v1/models', { headers: { cookie } })).status, 404);
+    assert.equal((await request(base, '/server/index.mjs', { headers: { cookie } })).status, 404);
+    assert.equal((await request(base, '/assets/%2e%2e/server/index.mjs', { headers: { cookie } })).status, 404);
     assert.deepEqual(JSON.parse((await request(base, '/api/tasks', { headers: { cookie } })).body), { tasks: [] });
     assert.deepEqual(JSON.parse((await request(base, '/api/agent/pending', { headers: { cookie } })).body), { chats: [] });
     assert.equal((await request(base, '/api/native/operations', { method: 'POST', body: '{"kind":"calibrate"}', headers: { ...sessionHeaders(base), cookie, 'content-type': 'application/json' } })).status, 403);
@@ -167,6 +204,126 @@ test('Studio rejects CSRF and exposes only manager routes and operation kinds', 
     assert.deepEqual(started, [{ action: 'start', mode: 'quick' }]);
     assert.equal(tunnelState.status, 'starting');
   } finally { await stop(); }
+});
+
+test('Studio chat JSON routes keep only Studio chats and project saves, reads, revisions and deletes', async () => {
+  const hostChat = { id: 's_host', title: 'Host', createdAt: 'a', updatedAt: 'b', messages: [{ role: 'user', content: 'private' }] };
+  let saved = { id: 'studio_one', title: 'Mine', createdAt: 'a', updatedAt: 'b', messages: [{ id: 'm1', role: 'user', content: 'Hello' }], tokensIn: 0, tokensOut: 0 };
+  let rev = 1;
+  const { base, gateway, seen, stop } = await fixture((req, res, body) => {
+    const path = new URL(req.url, 'http://origin').pathname;
+    if (path === '/api/chats') return jsonAnswer(res, 200, { v: 1, chats: [hostChat, { id: 'studio_one', title: 'Mine', createdAt: 'a', updatedAt: 'b', bytes: 20 }], damaged: ['s_bad'], newer: [] });
+    if (path === '/api/chats/studio_one' && req.method === 'GET') return jsonAnswer(res, 200, { rev, savedAt: 'then', session: { ...saved, workspaceId: 'private', messages: saved.messages.map(m => ({ ...m, tools: ['shell'] })) }, private: 'secret' }, { 'set-cookie': 'upstream=secret' });
+    if (path === '/api/chats/studio_one' && req.method === 'PUT') {
+      saved = JSON.parse(body.toString());
+      rev += 1;
+      return jsonAnswer(res, 200, { id: saved.id, rev, bytes: 42, conflict: false, path: '/home/alice/private' });
+    }
+    if (path === '/api/chats/studio_one' && req.method === 'DELETE') return jsonAnswer(res, 200, { id: 'studio_one', removed: true, path: '/home/alice/private' });
+    jsonAnswer(res, 404, { error: 'not found' });
+  });
+  try {
+    const cookie = await loginCookie(gateway, base);
+    const headers = { cookie, origin: base, 'content-type': 'application/json', authorization: 'Bearer browser-secret' };
+    const list = await request(base, '/api/chats?surface=desktop', { headers });
+    assert.equal(list.status, 200, list.body);
+    assert.deepEqual(JSON.parse(list.body), { v: 1, chats: [{ id: 'studio_one', title: 'Mine', createdAt: 'a', updatedAt: 'b', bytes: 20 }], damaged: [], newer: [] });
+    assert.equal(seen.at(-1).url, '/api/chats?surface=studio');
+    assert.equal(seen.at(-1).headers.cookie, undefined);
+    assert.equal(seen.at(-1).headers.authorization, undefined);
+
+    const read = await request(base, '/api/chats/studio_one', { headers });
+    assert.equal(read.status, 200, read.body);
+    assert.equal(read.headers['set-cookie'], undefined);
+    assert.equal(JSON.parse(read.body).session.workspaceId, undefined);
+    assert.equal(JSON.parse(read.body).session.messages[0].tools, undefined);
+    assert.equal(JSON.parse(read.body).rev, 1);
+
+    const input = { ...saved, workspaceId: 'private', agent: true, messages: [{ id: 'm2', role: 'assistant', content: 'Hi', artifacts: ['host.txt'] }] };
+    const put = await request(base, '/api/chats/studio_one', { method: 'PUT', headers: { ...headers, 'x-strata-base-rev': '1' }, body: JSON.stringify(input) });
+    assert.equal(put.status, 200, put.body);
+    assert.deepEqual(JSON.parse(put.body), { id: 'studio_one', rev: 2, bytes: 42, conflict: false });
+    assert.equal(seen.at(-1).headers['x-strata-base-rev'], '1');
+    assert.deepEqual(JSON.parse(seen.at(-1).body), { id: 'studio_one', title: 'Mine', createdAt: 'a', updatedAt: 'b', messages: [{ id: 'm2', role: 'assistant', content: 'Hi' }], tokensIn: 0, tokensOut: 0 });
+    const readAgain = JSON.parse((await request(base, '/api/chats/studio_one', { headers })).body);
+    assert.equal(readAgain.rev, 2);
+    assert.equal(readAgain.session.messages[0].artifacts, undefined);
+
+    const removed = await request(base, '/api/chats/studio_one', { method: 'DELETE', headers });
+    assert.deepEqual(JSON.parse(removed.body), { id: 'studio_one', removed: true });
+    const before = seen.length;
+    assert.equal((await request(base, '/api/chats/studio_one', { method: 'PUT', body: '{}', headers: { cookie } })).status, 403, 'CSRF');
+    assert.equal((await request(base, '/api/chats/studio_one', { method: 'PUT', headers, body: JSON.stringify(hostChat) })).status, 400);
+    assert.equal(seen.length, before);
+  } finally { await stop(); }
+});
+
+test('Studio chat NDJSON is projected as split frames arrive and disconnect cancels the upstream turn', async () => {
+  let release, releaseStop;
+  const gate = new Promise(resolve => { release = resolve; });
+  const stopGate = new Promise(resolve => { releaseStop = resolve; });
+  let cancelled = 0, requests = 0;
+  const first = '{"type":"delta","text":"Hello","requestId":"private"}\n';
+  const { base, gateway, seen, stop } = await fixture(async (req, res, body) => {
+    if (new URL(req.url, 'http://origin').pathname !== '/api/chat/stream') return jsonAnswer(res, 200, { ok: true });
+    requests += 1;
+    res.on('close', () => { if (!res.writableEnded) cancelled += 1; });
+    res.writeHead(200, { 'content-type': 'application/x-ndjson', 'set-cookie': 'upstream=secret' });
+    res.write(first.slice(0, 17));
+    await new Promise(resolve => setImmediate(resolve));
+    res.write(first.slice(17));
+    res.write('{"type":"tool","name":"shell","args":"private"}\n');
+    if (requests === 1) await gate;
+    if (requests === 2) await stopGate;
+    res.end('{"type":"beat"}\n{"type":"status","phase":"answering","text":"Failed /srv/private/model","requestId":"private"}\n{"type":"error","message":"Failed /home/alice/model","details":"STRATA_TOKEN=secret"}\n{"type":"done","tokensOut":2,"tools":["shell"]}\n');
+  });
+  try {
+    const cookie = await loginCookie(gateway, base);
+    const headers = { cookie, origin: base, 'content-type': 'application/json' };
+    const body = JSON.stringify({ sessionId: 'studio_one', message: 'Hello', agent: true, tools: true, useTools: true, remoteModel: { connectionId: 'secret' }, images: ['private'], workspaceId: 'private', planId: 'private' });
+    const stream = streamRequest(base, '/api/chat/stream', { method: 'POST', headers, body });
+    const res = await stream.response;
+    assert.equal(res.statusCode, 200);
+    assert.match(res.headers['content-type'], /application\/x-ndjson/);
+    assert.equal(res.headers['set-cookie'], undefined);
+    let firstFrame, timer;
+    const arrived = stream.firstLine.then(line => { firstFrame = line; });
+    try {
+      await Promise.race([arrived, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('the first frame was buffered')), 3000); })]);
+    } finally { clearTimeout(timer); }
+    assert.equal(firstFrame, '{"type":"delta","text":"Hello"}');
+    assert.equal(cancelled, 0);
+    assert.deepEqual(JSON.parse(seen.at(-1).body), { sessionId: 'studio_one', message: 'Hello', history: [], thinking: 'Medium', thinkingBudget: 0, agent: false, tools: false, useTools: false });
+    assert.equal(seen.at(-1).headers.cookie, undefined);
+    assert.equal(seen.at(-1).headers.origin, undefined);
+    release();
+    const text = await stream.done;
+    const frames = text.trim().split('\n').map(JSON.parse);
+    assert.deepEqual(frames, [
+      { type: 'delta', text: 'Hello' }, { type: 'beat' },
+      { type: 'status', seq: 0, phase: 'answering', code: '', text: 'Failed [local path]', elapsedMs: 0 },
+      { type: 'error', message: 'Failed [local path]', code: undefined },
+      { type: 'done', tokensOut: 2 },
+    ].map(frame => Object.fromEntries(Object.entries(frame).filter(([, value]) => value !== undefined))));
+    assert.doesNotMatch(text, /tool|shell|private|STRATA_TOKEN|\/home\/|\/srv\//);
+
+    const stopped = streamRequest(base, '/api/chat/stream', { method: 'POST', headers, body });
+    await stopped.response;
+    stopped.abort();
+    await assert.rejects(stopped.done);
+    for (let i = 0; i < 100 && cancelled < 1; i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(cancelled, 1, 'closing Studio closed the origin stream');
+    releaseStop();
+    const next = streamRequest(base, '/api/chat/stream', { method: 'POST', headers, body });
+    await next.response;
+    assert.match(await next.done, /"type":"done"/);
+    assert.equal(cancelled, 1, 'the next request was not cancelled');
+
+    const before = seen.length;
+    assert.equal((await request(base, '/api/chat/stream', { method: 'POST', body, headers: { cookie } })).status, 403);
+    assert.equal((await request(base, '/api/chat/stream', { method: 'POST', headers, body: JSON.stringify({ sessionId: 's_host', message: 'Hello' }) })).status, 400);
+    assert.equal(seen.length, before);
+  } finally { release(); releaseStop(); await stop(); }
 });
 
 test('Studio filters paths, model arguments and environment before forwarding', async () => {

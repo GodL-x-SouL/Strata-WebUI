@@ -8,7 +8,7 @@ import { Icon } from './ui';
  * The model's reasoning as one quiet line above its answer. Closed by default: while it reasons the line shows what it is thinking about,
  * afterwards "Thought for 38s". Opened, it is a short muted box that follows the newest line unless the person scrolls up.
  */
-export function ReasoningBlock({ message }: { message: ChatMessage }) {
+export function ReasoningBlock({ message }: { message: Pick<ChatMessage, 'reasoning' | 'streaming' | 'reasoningMs' | 'content'> }) {
   const text = message.reasoning ?? '';
   const body = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);

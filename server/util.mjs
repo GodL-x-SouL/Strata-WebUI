@@ -142,7 +142,9 @@ export class EventHub {
         if (res.writableNeedDrain && REPLACEABLE.has(event)) continue;
         if (res.writableLength > EVENT_BACKLOG_MAX) { this.#clients.delete(res); res.destroy(); continue; }
         const transform = this.#transforms.get(res);
-        const frame = `event: ${event}\ndata: ${JSON.stringify(transform ? transform(event, payload) : payload)}\n\n`;
+        const payloadSafe = transform ? transform(event, payload) : payload;
+        if (payloadSafe === null || payloadSafe === undefined) continue;
+        const frame = `event: ${event}\ndata: ${JSON.stringify(payloadSafe)}\n\n`;
         res.write(frame);
       } catch {
         this.#clients.delete(res);

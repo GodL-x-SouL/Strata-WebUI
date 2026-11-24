@@ -1112,7 +1112,10 @@ export async function bootstrap() {
       set({ connection: status });
     });
     if (!setup.complete && !setup.dismissed && !window.location.hash.includes('setup')) navigate('setup');
-    else if (studio && !['models', 'tuning', 'serving', 'monitor', 'setup'].includes(window.location.hash.replace(/^#\/?/, '').split('/')[0])) navigate('models');
+    else if (studio) {
+      const studioRoute = window.location.hash.replace(/^#\/?/, '').split('/')[0];
+      if (studioRoute && !['chat', 'models', 'tuning', 'serving', 'monitor', 'setup'].includes(studioRoute)) navigate('chat');
+    }
   } catch (err) {
     set({ ready: true, connection: 'offline' });
     pushToast(

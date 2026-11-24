@@ -51,7 +51,7 @@ test('the fix catalogs have the same keys and placeholders in all nine languages
 test('the Studio manager strings translate in every language', async () => {
   const en = await read('en');
   const keys = Object.keys(en).filter(key => key.startsWith('studio'));
-  assert.equal(keys.length, 27);
+  assert.equal(keys.length, 40);
   for (const language of languages) {
     const catalog = await read(language);
     for (const key of keys) {

@@ -2,7 +2,7 @@ import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { badRequest, error, json, readBody, requestUrl, sameSecret } from './util.mjs';
 import { LANGUAGES } from './shell-prefs.mjs';
-import { studioApiError, studioApiResponse, studioDiagnosticText, studioSetupStepInput, studioTunnelState } from './studio-data.mjs';
+import { studioApiError, studioApiResponse, studioChatEnvelope, studioChatFrame, studioChatList, studioChatSaveResult, studioChatSession, studioChatTurn, studioDiagnosticText, isStudioChatId, studioSetupStepInput, studioTunnelState } from './studio-data.mjs';
 
 const SESSION_COOKIE = 'strata_studio_session';
 const SECURE_COOKIE = '__Host-strata_studio_session';
@@ -43,6 +43,66 @@ const WRITE_ROUTES = new Set([
   '/api/serving', '/api/shell/prefs',
 ]);
 const HOP_HEADERS = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
+const STATIC_PREFIXES = ['/assets/', '/icons/', '/fonts/', '/brand/'];
+const STATIC_FILES = new Set(['/', '/apple-touch-icon.png', '/favicon.svg', '/site.webmanifest', '/icon-192.png', '/icon-512.png', '/strata-done-sound.wav']);
+const CHAT_FRAME_LIMIT = 2 * 1024 * 1024;
+
+function chatIdFromPath(path) {
+  const match = /^\/api\/chats\/([^/]+)$/.exec(path);
+  if (!match) return null;
+  try { return decodeURIComponent(match[1]); } catch { return null; }
+}
+
+function staticAsset(path) {
+  if (/[\\%]/.test(path) || path.split('/').some(part => part === '.' || part === '..')) return false;
+  return STATIC_FILES.has(path) || STATIC_PREFIXES.some(prefix => path.startsWith(prefix)) || /^\/favicon(?:-[a-z0-9-]+)?\.(?:png|svg|ico)$/.test(path);
+}
+
+async function writeStreamFrame(res, text) {
+  if (res.destroyed || res.writableEnded) return false;
+  if (res.write(text)) return true;
+  await new Promise(resolve => {
+    const done = () => { res.off('drain', done); res.off('close', done); res.off('error', done); resolve(); };
+    res.once('drain', done);
+    res.once('close', done);
+    res.once('error', done);
+  });
+  return !res.destroyed && !res.writableEnded;
+}
+
+async function relayStudioStream(answer, res, responseHeaders) {
+  for (const name of ['content-length', 'content-encoding', 'content-md5', 'digest', 'etag', 'last-modified']) delete responseHeaders[name];
+  responseHeaders['cache-control'] = 'no-cache, no-transform';
+  responseHeaders['x-accel-buffering'] = 'no';
+  responseHeaders['x-content-type-options'] = 'nosniff';
+  res.writeHead(answer.statusCode ?? 200, responseHeaders);
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const line = async text => {
+    let value;
+    try { value = JSON.parse(text); } catch { return true; }
+    const frame = studioChatFrame(value);
+    return frame ? writeStreamFrame(res, `${JSON.stringify(frame)}\n`) : true;
+  };
+  try {
+    for await (const chunk of answer) {
+      buffer += decoder.decode(chunk, { stream: true });
+      if (Buffer.byteLength(buffer) > CHAT_FRAME_LIMIT) throw new Error('Studio chat frame too large.');
+      let at;
+      while ((at = buffer.indexOf('\n')) >= 0) {
+        const text = buffer.slice(0, at).trim();
+        buffer = buffer.slice(at + 1);
+        if (text && !await line(text)) return;
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim() && Buffer.byteLength(buffer) <= CHAT_FRAME_LIMIT) await line(buffer.trim());
+    if (!res.destroyed && !res.writableEnded) res.end();
+  } catch {
+    answer.destroy();
+    res.destroy();
+  }
+}
 
 function loopback(address) {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
@@ -83,6 +143,10 @@ const LOGIN_CSS = `:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0
 const LOGIN_JS = `const form=document.getElementById('login'),input=document.getElementById('key'),message=document.getElementById('message');async function enter(key){form.querySelector('button').disabled=true;message.textContent='Opening…';try{const r=await fetch('/studio/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key})});const body=await r.json().catch(()=>({}));if(!r.ok)throw new Error(body.error||'That key was not accepted.');location.replace('/');}catch(e){message.textContent=e.message;form.querySelector('button').disabled=false;}}form.addEventListener('submit',e=>{e.preventDefault();enter(input.value)});fetch('/studio/local-key').then(r=>r.ok?r.json():null).then(v=>{if(v&&v.key){input.value=v.key;enter(v.key)}}).catch(()=>{});`;
 
 function allowed(path, method) {
+  if (path === '/api/chat/stream' && method === 'POST') return true;
+  if (path === '/api/chats' && method === 'GET') return true;
+  const chatId = chatIdFromPath(path);
+  if (chatId && isStudioChatId(chatId) && ['GET', 'PUT', 'DELETE'].includes(method)) return true;
   if (method === 'GET' || method === 'HEAD') {
     if (READ_ROUTES.has(path)) return true;
     if (/^\/api\/native\/models\/[a-z0-9_.-]+\/settings$/.test(path)) return true;
@@ -124,6 +188,7 @@ function remoteTunnelInput(value) {
 }
 
 function proxy(originPort, req, res, path, body) {
+  const pathname = new URL(path, 'http://studio').pathname;
   const headers = { ...req.headers, host: `127.0.0.1:${originPort}`, 'accept-encoding': 'identity' };
   for (const name of HOP_HEADERS) delete headers[name];
   for (const name of ['cookie', 'authorization', 'origin', 'referer', 'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-user']) delete headers[name];
@@ -136,6 +201,11 @@ function proxy(originPort, req, res, path, body) {
     const status = answer.statusCode ?? 502;
     const type = String(responseHeaders['content-type'] ?? '').toLowerCase();
     const json = type.includes('application/json') || type.includes('+json');
+    if (pathname === '/api/chat/stream' && status < 400) {
+      if (!type.includes('application/x-ndjson')) { answer.destroy(); return send(res, 502, { error: 'The local Strata host did not open a chat stream.' }); }
+      void relayStudioStream(answer, res, responseHeaders);
+      return;
+    }
     if (req.method === 'HEAD' || status === 204 || status === 304 || type.includes('text/event-stream') || !json && status < 400) {
       res.writeHead(status, responseHeaders);
       answer.pipe(res);
@@ -156,8 +226,14 @@ function proxy(originPort, req, res, path, body) {
       try { value = json ? JSON.parse(raw) : raw; }
       catch { return send(res, 502, { error: 'The local Strata host returned an invalid response.' }); }
       let payload;
-      try { payload = status >= 400 ? studioApiError(value) : studioApiResponse(path, value); }
-      catch { return send(res, 502, { error: 'Studio could not read that response safely.' }); }
+      try {
+        if (status >= 400) payload = studioApiError(value);
+        else if (pathname === '/api/chats') payload = studioChatList(value);
+        else if (chatIdFromPath(pathname) && req.method === 'GET') payload = studioChatEnvelope(value);
+        else if (chatIdFromPath(pathname) && req.method === 'PUT') payload = studioChatSaveResult(value);
+        else if (chatIdFromPath(pathname) && req.method === 'DELETE') payload = { id: chatIdFromPath(pathname), removed: value?.removed === true };
+        else payload = studioApiResponse(path, value);
+      } catch { return send(res, 502, { error: 'Studio could not read that response safely.' }); }
       const text = JSON.stringify(payload);
       for (const name of ['content-length', 'content-encoding', 'content-md5', 'digest', 'etag', 'last-modified']) delete responseHeaders[name];
       responseHeaders['content-type'] = 'application/json; charset=utf-8';
@@ -306,6 +382,16 @@ export function createStudioGateway({ originPort, port = 0, tunnel = () => null,
     if (path.startsWith('/api/')) {
       if (!allowed(path, method)) return error(res, 404, 'That control is not available in Studio.');
       const upstreamPath = studioPath(url);
+      if (path === '/api/chat/stream' && method === 'POST') {
+        let body;
+        try { body = studioChatTurn(await readBody(req, 8 * 1024 * 1024)); } catch (e) { return error(res, 400, e.message); }
+        return proxy(originPort, req, res, upstreamPath, Buffer.from(JSON.stringify(body)));
+      }
+      if (chatIdFromPath(path) && method === 'PUT') {
+        let body;
+        try { body = studioChatSession(await readBody(req, 12 * 1024 * 1024)); } catch (e) { return error(res, 400, e.message); }
+        return proxy(originPort, req, res, upstreamPath, Buffer.from(JSON.stringify(body)));
+      }
       if (path === '/api/setup/step' && method === 'POST') {
         let body;
         try { body = studioSetupStepInput(await readBody(req, 64 * 1024)); } catch (e) { return error(res, 400, e.message); }
@@ -344,6 +430,7 @@ export function createStudioGateway({ originPort, port = 0, tunnel = () => null,
       return proxy(originPort, req, res, upstreamPath);
     }
     if (method !== 'GET' && method !== 'HEAD') return error(res, 405, 'Method not allowed.');
+    if (!staticAsset(path)) return error(res, 404, 'That page is not available in Studio.');
     return proxy(originPort, req, res, requestPath);
   }
 

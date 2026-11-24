@@ -95,7 +95,13 @@ export async function streamPost(
   });
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => '');
-    throw new ApiError(text || `Stream failed (${res.status})`, res.status);
+    let message = text;
+    try {
+      const data = JSON.parse(text) as { error?: string; message?: string };
+      message = data.error ?? data.message ?? text;
+    } catch { /* Plain-text failure. */ }
+    if (res.status === 401) window.location.assign('/studio/login');
+    throw new ApiError(message || `Stream failed (${res.status})`, res.status);
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();

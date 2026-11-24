@@ -75,6 +75,133 @@
   color: var(--st-ink-muted);
 }
 
+.studio-chat {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.studio-chat__header .main__sub {
+  display: flex;
+  align-items: center;
+}
+
+.studio-chat__recent {
+  width: min(220px, 32vw);
+  min-width: 0;
+}
+
+.studio-chat__transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.studio-chat__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: min(100%, 480px);
+  margin: auto;
+  padding: 48px 0;
+  text-align: center;
+  color: var(--st-ink-muted);
+}
+
+.studio-chat__empty h2 {
+  margin: 4px 0 0;
+  color: var(--st-ink);
+}
+
+.studio-chat__empty p {
+  max-width: 440px;
+  margin: 0 0 8px;
+}
+
+.studio-chat__composer {
+  flex: none;
+  width: min(100%, 920px);
+  margin: 0 auto;
+  padding: 10px 28px calc(14px + env(safe-area-inset-bottom));
+}
+
+.studio-chat__box {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 10px 10px 10px 14px;
+  border: 1px solid var(--st-line);
+  border-radius: var(--st-r-lg);
+  background: var(--st-surface);
+  box-shadow: var(--st-sh-card);
+}
+
+.studio-chat__box:focus-within {
+  border-color: var(--st-accent);
+}
+
+.studio-chat__box textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 38px;
+  max-height: 180px;
+  padding: 8px 0;
+  resize: none;
+  overflow-y: auto;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--st-ink);
+  font: inherit;
+  line-height: 1.5;
+}
+
+.studio-chat__box .st-btn {
+  flex: none;
+}
+
+.studio-chat__hint {
+  margin: 7px 2px 0;
+}
+
+.studio-chat__status {
+  margin-top: 8px;
+}
+
+.studio-chat__error {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--st-danger) 24%, transparent);
+  border-radius: var(--st-r-sm);
+  background: var(--st-danger-tint);
+  color: var(--st-danger-text);
+  overflow-wrap: anywhere;
+}
+
+.st-bubble .studio-chat__error:last-child {
+  margin-bottom: 0;
+}
+
+@media (max-width: 640px) {
+  .studio-chat__header {
+    padding-inline: 16px;
+  }
+
+  .studio-chat__recent {
+    width: min(150px, 38vw);
+  }
+
+  .studio-chat__composer {
+    padding-inline: 14px;
+  }
+
+  .studio-chat__empty {
+    padding-block: 32px;
+  }
+}
+
 @media (max-width: 640px) {
   .studio-key {
     align-items: flex-start;

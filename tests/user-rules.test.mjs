@@ -63,9 +63,10 @@ test('no rules add nothing to the prompt; rules add one block', t => {
   assert.equal(rules.promptBlock(), 'The person you are helping set these rules for every answer:\nAnswer in German.');
 });
 
-test('every plain chat path of the host adds the rules block', () => {
+test('local plain chats add the rules block but Studio chats keep only the base prompt', () => {
   const src = readFileSync(new URL('../server/index.mjs', import.meta.url), 'utf8');
   assert.equal((src.match(/userRules\.promptBlock\(\)/g) ?? []).length, 3);
+  assert.equal((src.match(/studioPlain\s*\?\s*SYSTEM_PROMPT\s*:/g) ?? []).length, 2);
   assert.equal((src.match(/\[SYSTEM_PROMPT, *skillInstructions/g) ?? []).length, 0);
 });
 

@@ -73,7 +73,7 @@ import { checkUpdates, checkComponentUpdates, engineFirstRun } from './updates.m
 import { plainNoModel } from './no-model-text.mjs';
 import { createAppUi, openInBrowser } from './app-ui.mjs';
 import { createStudioGateway } from './studio-gateway.mjs';
-import { studioEvent, studioSetupStepInput } from './studio-data.mjs';
+import { studioChatEnvelope, studioChatFrame, studioChatList, studioChatSession, studioChatTurn, isStudioChatId, studioEvent, studioSetupStepInput } from './studio-data.mjs';
 import { appVersionFrom, appVersionToShow } from './app-version.mjs';
 import { createImageModels } from './image-models.mjs';
 import { createRuntimeModels } from './runtime-models.mjs';
@@ -686,12 +686,12 @@ async function runAgentTurn({ res, controller, chatId, body, message, workspaceI
   }
 }
 
-async function runTurn({ message, history = [], onFrame, signal, client, workspaceId = null, sessionId = null, remoteModel = null, runtimeModelId = undefined, nativeModelId, images=[], useTools=false, thinking='medium', thinkingBudget=0 }) {
+async function runTurn({ message, history = [], onFrame, signal, client, workspaceId = null, sessionId = null, remoteModel = null, runtimeModelId = undefined, nativeModelId, images=[], useTools=false, thinking='medium', thinkingBudget=0, studioPlain=false }) {
   if (remoteModel) return runRemoteTurn({ selection: remoteModel, message, history, images, thinking, onFrame, signal, workspaceId });
   if(native.hasLive()||nativeModelId){
     let instance;try{instance=native.resolveInstance(nativeModelId??native.state().defaultId);}catch(e){const message=plainNoModel(e.message);onFrame({type:'error',message});return {error:message};}const started=Date.now(),cancel=new AbortController();
     const entry=serving.open({client:client??'Strata chat',endpoint:'/chat/completions',model:instance.apiModelId,instanceId:instance.id,gpuIds:instance.gpus.map(String),cancel:()=>cancel.abort()});
-    try{serving.mark(entry.id,{state:'generating'});const applied=selectSkills(skillState,message,workspaceId);const hy4Local=instance.arch==='hy4flash'||/^hy4-flash/i.test(String(instance.model??instance.apiModelId??''));const inklingLocal=instance.arch==='inkling2_loop'||/^inkling-2-mini/i.test(String(instance.model??instance.apiModelId??''));const thinkKey=String(thinking).toLowerCase();const effortWord=hy4Local?(thinkKey==='xhigh'?'max':({off:'none',minimal:'high',low:'high',medium:'high',high:'high',max:'max'}[String(thinking).toLowerCase()]??'high')):inklingLocal?'none':({off:'none',max:'high'}[String(thinking).toLowerCase()]??(thinkKey==='xhigh'?'high':thinkKey));const result=await proxyCompletion({baseUrl:`http://127.0.0.1:${instance.port}/v1`,modelId:instance.apiModelId,authorization:instance.key,message,history,images,extra:{strata_mcp:useTools===true,...(!inklingLocal&&thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}),reasoning_effort:effortWord},systemPrompt:[SYSTEM_PROMPT,userRules.promptBlock(),skillInstructions(applied)].filter(Boolean).join('\n\n'),signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame:frame=>onFrame({...frame,requestId:entry.id,model:instance.label,contextMax:instance.metrics?.engine?.max_context??instance.context,skills:applied.map(s=>s.name)})});serving.mark(entry.id,{...result,usageSource:result.usageSource});serving.finish(entry.id,{tokensOut:result.tokensOut,durationMs:Date.now()-started});return result;}catch(e){serving.finish(entry.id,{durationMs:Date.now()-started,error:e.message});onFrame({type:'error',message:e.message,requestId:entry.id});return {error:e.message};}
+    try{serving.mark(entry.id,{state:'generating'});const applied=studioPlain?[]:selectSkills(skillState,message,workspaceId);const hy4Local=instance.arch==='hy4flash'||/^hy4-flash/i.test(String(instance.model??instance.apiModelId??''));const inklingLocal=instance.arch==='inkling2_loop'||/^inkling-2-mini/i.test(String(instance.model??instance.apiModelId??''));const thinkKey=String(thinking).toLowerCase();const effortWord=hy4Local?(thinkKey==='xhigh'?'max':({off:'none',minimal:'high',low:'high',medium:'high',high:'high',max:'max'}[String(thinking).toLowerCase()]??'high')):inklingLocal?'none':({off:'none',max:'high'}[String(thinking).toLowerCase()]??(thinkKey==='xhigh'?'high':thinkKey));const result=await proxyCompletion({baseUrl:`http://127.0.0.1:${instance.port}/v1`,modelId:instance.apiModelId,authorization:instance.key,message,history,images,extra:{strata_mcp:!studioPlain&&useTools===true,...(!inklingLocal&&thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}),reasoning_effort:effortWord},systemPrompt:studioPlain?SYSTEM_PROMPT:[SYSTEM_PROMPT,userRules.promptBlock(),skillInstructions(applied)].filter(Boolean).join('\n\n'),signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame:frame=>onFrame({...frame,requestId:entry.id,model:instance.label,contextMax:instance.metrics?.engine?.max_context??instance.context,skills:applied.map(s=>s.name)})});serving.mark(entry.id,{...result,usageSource:result.usageSource});serving.finish(entry.id,{tokensOut:result.tokensOut,durationMs:Date.now()-started});return result;}catch(e){serving.finish(entry.id,{durationMs:Date.now()-started,error:e.message});onFrame({type:'error',message:e.message,requestId:entry.id});return {error:e.message};}
   }
   runtimeState();
   let instance;
@@ -720,8 +720,8 @@ async function runTurn({ message, history = [], onFrame, signal, client, workspa
       runtimeModels.update(instance.id,{phase:'reading'});
       // Scope is resolved again at dispatch: a disabled skill never stays active
       // merely because the request waited in the queue.
-      const appliedSkills = selectSkills(skillState, message, workspaceId);
-      const systemPrompt = [SYSTEM_PROMPT, userRules.promptBlock(), skillInstructions(appliedSkills)].filter(Boolean).join('\n\n');
+      const appliedSkills = studioPlain ? [] : selectSkills(skillState, message, workspaceId);
+      const systemPrompt = studioPlain ? SYSTEM_PROMPT : [SYSTEM_PROMPT, userRules.promptBlock(), skillInstructions(appliedSkills)].filter(Boolean).join('\n\n');
       serving.mark(entry.id, { state: 'generating' });
       const contextMax = instance.memory.context;
       const modelMonitor=models.REAL?monitor:{
@@ -737,7 +737,7 @@ async function runTurn({ message, history = [], onFrame, signal, client, workspa
           history,
           systemPrompt,
           modelLabel: v.label,
-          candidates: readableCandidates(),
+          candidates: studioPlain ? [] : readableCandidates(),
           onFrame: (frame) => {
             if(frame.type==='stats'||frame.type==='done')modelMonitor.progressOutput(frame.tokensOut);
             // Time to first *token*. A `tool` frame is a proposal, not generated
@@ -1083,8 +1083,11 @@ async function api(req, res, path, method, url) {
     let id = null;
     try { id = chatsRoute[1] ? decodeURIComponent(chatsRoute[1]) : null; } catch { return error(res, 400, 'That is not a chat id.', { code: 'bad-id' }); }
     const from = typeof req.headers['x-strata-window'] === 'string' ? req.headers['x-strata-window'].slice(0, 64) : null;
+    const studioSurface = url.searchParams.get('surface') === 'studio';
+    if (studioSurface && id === 'import' && method === 'POST') return error(res, 403, 'Studio cannot import host chats.');
+    if (studioSurface && id && !isStudioChatId(id)) return error(res, 404, 'No such Studio chat.', { code: 'not-found' });
     try {
-      if (!id && method === 'GET') return json(res, 200, chatStore.list());
+      if (!id && method === 'GET') return json(res, 200, studioSurface ? studioChatList(chatStore.list()) : chatStore.list());
       if (id === 'import' && method === 'POST') {
         const result = await trackChatSave(async () => {
           const body = JSON.parse((await readRaw(req, 512 * 1024 * 1024)).toString('utf8') || '{}');
@@ -1096,11 +1099,24 @@ async function api(req, res, path, method, url) {
       if (id && method === 'GET') {
         const text = await chatStore.read(id);
         if (text === null) return error(res, 404, 'No such chat.', { code: 'not-found' });
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(text), 'cache-control': 'no-store' });
-        res.end(text);
+        const body = studioSurface ? JSON.stringify(studioChatEnvelope(JSON.parse(text))) : text;
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' });
+        res.end(body);
         return undefined;
       }
       if (id && method === 'PUT') {
+        if (studioSurface) {
+          const result = await trackChatSave(async () => {
+            let text;
+            try { text = JSON.stringify(studioChatSession(JSON.parse((await readRaw(req, 256 * 1024 * 1024)).toString('utf8')))); }
+            catch (err) { return { failure: { message: err instanceof SyntaxError ? 'The request must be JSON.' : err.message, code: err instanceof SyntaxError ? 'bad-json' : 'bad-chat' } }; }
+            const base = req.headers['x-strata-base-rev'];
+            return { saved: await chatStore.save(id, text, { baseRev: typeof base === 'string' && /^\d+$/.test(base) ? Number(base) : null }) };
+          });
+          if (result.failure) return error(res, 400, result.failure.message, { code: result.failure.code });
+          hub.send('chats', { id, rev: result.saved.rev, from });
+          return json(res, 200, result.saved);
+        }
         const saved = await trackChatSave(async () => {
           const text = (await readRaw(req, 256 * 1024 * 1024)).toString('utf8');
           const base = req.headers['x-strata-base-rev'];
@@ -1124,7 +1140,7 @@ async function api(req, res, path, method, url) {
   if (storageChanging && !['GET', 'OPTIONS'].includes(method)) return error(res, 409, 'Wait for the model folder check to finish.');
   // --- events -------------------------------------------------------------
   // Studio JSON is projected once at the gateway; SSE is projected here because the gateway streams it unchanged.
-  if (path === '/api/events') return hub.add(res, url.searchParams.get('surface') === 'studio' ? ['monitor', 'models', 'native', 'serving', 'setup'] : null,
+  if (path === '/api/events') return hub.add(res, url.searchParams.get('surface') === 'studio' ? ['monitor', 'models', 'native', 'serving', 'setup', 'chats'] : null,
     url.searchParams.get('surface') === 'studio' ? (event, payload) => studioEvent(event, payload) : null);
   if(path.startsWith('/api/native')){try{
   if(path==='/api/native'&&method==='GET'){const value=await native.refresh(url.searchParams.get('refresh')==='1');return json(res,200,value);}
@@ -2265,8 +2281,9 @@ async function api(req, res, path, method, url) {
   /* A page that has just loaded asks which chats have a turn running (a reload does not stop a turn), and takes one over again: the catch-up
      of what was said while no page was there, then the live frames, as on /api/chat/stream. A turn that ended while the page was away
      (the page names it by requestId) is sent once, whole. 404 when there is nothing to take over. */
-  if (path === '/api/chat/active' && method === 'GET') return json(res, 200, { turns: agent.runningTurns(), woken: agent.wokenTurns() });
+  if (path === '/api/chat/active' && method === 'GET') return json(res, 200, url.searchParams.get('surface') === 'studio' ? { turns: [], woken: [] } : { turns: agent.runningTurns(), woken: agent.wokenTurns() });
   if (path === '/api/chat/attach' && method === 'POST') {
+    if (url.searchParams.get('surface') === 'studio') return error(res, 403, 'Studio chat streams cannot be taken over.');
     const b = await readBody(req);
     if (typeof b.sessionId !== 'string' || !b.sessionId) return error(res, 400, 'sessionId is required');
     const controller = new AbortController();
@@ -2286,6 +2303,7 @@ async function api(req, res, path, method, url) {
   }
   /* Stop one chat's turn. Resolves once the turn has really ended, not when the cancel was admitted. */
   if (path === '/api/chat/stop' && method === 'POST') {
+    if (url.searchParams.get('surface') === 'studio') return error(res, 403, 'Stop the Studio stream from the chat page.');
     const b = await readBody(req);
     if (typeof b.sessionId !== 'string') return error(res, 400, 'sessionId is required');
     // A Time-skip trial of this chat is stopped by the same Stop button (and cleans up its copies).
@@ -2296,7 +2314,13 @@ async function api(req, res, path, method, url) {
 
   // --- chat ---------------------------------------------------------------
   if ((path === '/api/chat/stream' || path === '/api/plan/start-goal') && method === 'POST') {
-    const body = await readBody(req,12*1024*1024);
+    let body = await readBody(req,12*1024*1024);
+    const studioSurface = url.searchParams.get('surface') === 'studio';
+    if (studioSurface) {
+      if (path === '/api/plan/start-goal') return error(res, 403, 'Studio chat does not run plans.');
+      try { body = studioChatTurn(body); }
+      catch (err) { return error(res, 400, err.message, { code: 'bad-studio-turn' }); }
+    }
     if (path === '/api/plan/start-goal') { body.message = '/plan start'; if (typeof body.planId !== 'string') return error(res, 400, 'planId is required'); }
     let images;try{const named=Array.isArray(body.imageIds)&&body.imageIds.length?uploads.dataUrls(typeof body.sessionId==='string'?body.sessionId:'',body.imageIds):[];images=validateChatImages([...(Array.isArray(body.images)?body.images:[]),...named]);}catch(e){return error(res,400,e.message);}
     if(images.length&&body.remoteModel){const own=modelProviders.withSecrets().find(c=>c.id===body.remoteModel.connectionId);const row=own?.models.find(m=>m.id===body.remoteModel.modelId);const refused=await pictureRefusal(own,row);if(refused)return error(res,409,refused);}
@@ -2340,7 +2364,11 @@ async function api(req, res, path, method, url) {
     }
 
     // A plain chat turn says what it is doing too (reading the message, thinking with a token count, writing).
-    const plain = withPlainStatus(frame => { if (!res.writableEnded && !res.destroyed) res.write(`${JSON.stringify(frame)}\n`); });
+    const emit = frame => {
+      const safe = studioSurface ? studioChatFrame(frame) : frame;
+      if (safe && !res.writableEnded && !res.destroyed) res.write(`${JSON.stringify(safe)}\n`);
+    };
+    const plain = withPlainStatus(emit);
     res.on('close', () => plain.dispose());
     await runTurn({
       message,
@@ -2349,11 +2377,12 @@ async function api(req, res, path, method, url) {
       signal: controller.signal,
       req,
       client: 'Strata chat',
-      workspaceId,
+      workspaceId: studioSurface ? null : workspaceId,
       sessionId: typeof body.sessionId === 'string' ? body.sessionId : null,
-      remoteModel: body.remoteModel ?? null,
+      remoteModel: studioSurface ? null : body.remoteModel ?? null,
       nativeModelId:body.nativeModelId,
-      images,useTools:body.useTools===true,thinking:body.thinking??'high',thinkingBudget:Number.isInteger(body.thinkingBudget)&&body.thinkingBudget>0?Math.min(body.thinkingBudget,262144):0,
+      images: studioSurface ? [] : images,useTools:!studioSurface&&body.useTools===true,thinking:body.thinking??'high',thinkingBudget:Number.isInteger(body.thinkingBudget)&&body.thinkingBudget>0?Math.min(body.thinkingBudget,262144):0,
+      studioPlain: studioSurface,
     });
     res.end();
     return undefined;

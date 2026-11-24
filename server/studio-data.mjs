@@ -455,6 +455,128 @@ export function studioSettings(value) {
   return result;
 }
 
+export const STUDIO_CHAT_PREFIX = 'studio_';
+const STUDIO_CHAT_ID = /^studio_[A-Za-z0-9][A-Za-z0-9_.-]{0,120}$/;
+const PLAIN_STATUS_PHASES = new Set(['starting', 'waiting', 'thinking', 'answering', 'idle']);
+const CHAT_NUMBER_FIELDS = ['tokensIn', 'tokensOut', 'cachedTokens', 'tps', 'promptTps', 'hitRate', 'pcieShare', 'durationMs', 'ttftMs', 'contextTokens', 'tokens'];
+
+export function isStudioChatId(value) {
+  return typeof value === 'string' && STUDIO_CHAT_ID.test(value);
+}
+
+function chatString(value, fallback = '', max = 4_000_000) {
+  if (typeof value !== 'string') return fallback;
+  return value.slice(0, max);
+}
+
+function chatNumber(value, fallback = 0) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function chatMessage(value) {
+  if (!object(value) || !['user', 'assistant'].includes(value.role)) throw new Error('Studio chats may contain only user and assistant messages.');
+  const message = { role: value.role, content: chatString(value.content) };
+  if (typeof value.id === 'string') message.id = value.id.slice(0, 128);
+  if (typeof value.reasoning === 'string') message.reasoning = value.reasoning;
+  if (typeof value.error === 'string') message.error = value.error;
+  return message;
+}
+
+export function studioChatSession(value) {
+  if (!object(value) || !isStudioChatId(value.id)) throw new Error('Studio chats need a studio_ id.');
+  if (!Array.isArray(value.messages)) throw new Error('Studio chats need messages.');
+  return {
+    id: value.id,
+    title: chatString(value.title, 'Studio chat', 200),
+    createdAt: chatString(value.createdAt, new Date().toISOString(), 40),
+    updatedAt: chatString(value.updatedAt, new Date().toISOString(), 40),
+    messages: value.messages.map(chatMessage),
+    tokensIn: chatNumber(value.tokensIn),
+    tokensOut: chatNumber(value.tokensOut),
+  };
+}
+
+export function studioChatList(value) {
+  if (!object(value)) throw new Error('The host did not return a chat list.');
+  return {
+    v: 1,
+    chats: Array.isArray(value.chats) ? value.chats.filter(entry => object(entry) && isStudioChatId(entry.id)).map(entry => clean(pick(entry, ['id', 'title', 'createdAt', 'updatedAt', 'bytes']))) : [],
+    damaged: Array.isArray(value.damaged) ? value.damaged.filter(isStudioChatId) : [],
+    newer: Array.isArray(value.newer) ? value.newer.filter(isStudioChatId) : [],
+  };
+}
+
+export function studioChatEnvelope(value) {
+  if (!object(value) || !object(value.session)) throw new Error('The host did not return a Studio chat.');
+  return {
+    rev: chatNumber(value.rev),
+    savedAt: chatString(value.savedAt, new Date().toISOString(), 40),
+    session: studioChatSession(value.session),
+  };
+}
+
+export function studioChatSaveResult(value) {
+  if (!object(value) || !isStudioChatId(value.id)) throw new Error('The host did not save the Studio chat.');
+  return { id: value.id, rev: chatNumber(value.rev), bytes: chatNumber(value.bytes), conflict: value.conflict === true };
+}
+
+export function studioChatEvent(value) {
+  if (!object(value) || !isStudioChatId(value.id)) return null;
+  const event = { id: value.id };
+  if (Object.hasOwn(value, 'rev')) event.rev = chatNumber(value.rev);
+  if (Object.hasOwn(value, 'deleted')) event.deleted = value.deleted === true;
+  return event;
+}
+
+export function studioChatTurn(value) {
+  if (!object(value) || !isStudioChatId(value.sessionId)) throw new Error('Studio chats need a studio_ id.');
+  const message = chatString(value.message, '', 1_000_000).trim();
+  if (!message) throw new Error('Write a message first.');
+  if (value.history !== undefined && !Array.isArray(value.history)) throw new Error('Studio chat history must be a list.');
+  if ((value.history?.length ?? 0) > 500) throw new Error('This Studio chat has too many earlier messages.');
+  const history = (value.history ?? []).map(chatMessage).map(({ role, content }) => ({ role, content }));
+  return {
+    sessionId: value.sessionId,
+    message,
+    history,
+    thinking: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value.thinking) ? value.thinking : 'Medium',
+    thinkingBudget: Number.isInteger(value.thinkingBudget) && value.thinkingBudget > 0 ? Math.min(value.thinkingBudget, 262144) : 0,
+    ...(typeof value.nativeModelId === 'string' && value.nativeModelId.length > 0 && value.nativeModelId.length <= 128 ? { nativeModelId: value.nativeModelId } : {}),
+    agent: false,
+    tools: false,
+    useTools: false,
+  };
+}
+
+export function studioChatFrame(value) {
+  if (!object(value)) return null;
+  if (value.type === 'beat') return { type: 'beat' };
+  if (value.type === 'delta' || value.type === 'reasoning') return { type: value.type, text: chatString(value.text) };
+  if (value.type === 'start') return { type: 'start', model: typeof value.model === 'string' ? studioText(value.model) : '' };
+  if (value.type === 'status' && PLAIN_STATUS_PHASES.has(value.phase)) return {
+    type: 'status',
+    seq: chatNumber(value.seq),
+    phase: value.phase,
+    code: typeof value.code === 'string' ? value.code.slice(0, 80) : '',
+    text: studioDiagnosticText(chatString(value.text, '', 2000)),
+    ...(typeof value.key === 'string' ? { key: studioDiagnosticText(value.key.slice(0, 2000)), values: Array.isArray(value.values) ? value.values.slice(0, 10).map(item => studioDiagnosticText(String(item)).slice(0, 500)) : [] } : {}),
+    ...(typeof value.tokens === 'number' ? { tokens: chatNumber(value.tokens) } : {}),
+    elapsedMs: chatNumber(value.elapsedMs),
+  };
+  if (value.type === 'stats' || value.type === 'done') {
+    const frame = { type: value.type };
+    for (const field of CHAT_NUMBER_FIELDS) if (typeof value[field] === 'number' && Number.isFinite(value[field])) frame[field] = value[field];
+    for (const field of ['source', 'usageSource', 'finishReason']) if (typeof value[field] === 'string') frame[field] = value[field].slice(0, 80);
+    return frame;
+  }
+  if (value.type === 'error') return {
+    type: 'error',
+    message: studioDiagnosticText(chatString(value.message, 'The model could not answer.', 2000)),
+    ...(typeof value.code === 'string' ? { code: value.code.slice(0, 80) } : {}),
+  };
+  return null;
+}
+
 function tuneResponse(path, value) {
   if (path === '/api/native/tune/status') return studioTuneStatus(value);
   if (path === '/api/native/tune/effective') return studioTuneEffective(value);
@@ -482,10 +604,13 @@ export function studioApiResponse(path, value) {
   if (/^\/api\/native\/models\/[^/]+\/settings$/.test(route)) return studioSettings(value);
   if (route === '/api/native/operations') return studioNativeJob(value);
   if (/^\/api\/native\/instances\/[^/]+\/(unload|default)$/.test(route)) return studioNativeState(value);
+  if (route === '/api/chats') return studioChatList(value);
+  if (/^\/api\/chats\/[^/]+$/.test(route)) return studioChatEnvelope(value);
   return clean(value);
 }
 
 export function studioEvent(event, payload) {
+  if (event === 'chats') return studioChatEvent(payload);
   if (event === 'native') return studioNativeState(payload);
   if (event === 'models') return studioModelLibrary(payload);
   if (event === 'serving') return studioServingState(payload);

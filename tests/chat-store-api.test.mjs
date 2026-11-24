@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -76,6 +76,48 @@ test('the chat routes: named page only, other sites refused, save / read / list 
     // import: the browser's chats, the host keeps what it has
     const imp = await (await fetch(`${h.base}/api/chats/import`, { method: 'POST', headers: named('w1'), body: JSON.stringify({ sessions: [chat('s_big', 1, 1), chat('s_old', 3, 10)] }) })).json();
     assert.deepEqual([imp.imported, imp.skipped], [['s_old'], ['s_big']]);
+  } finally { await h.stop(); await rm(home, { recursive: true, force: true }).catch(() => {}); }
+});
+
+test('Studio chat storage stays in its namespace, strips host-only fields and leaves ordinary chats unchanged', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'strata-studio-chats-api-'));
+  const h = await startHost(home);
+  const studioHeaders = named('studio-window', { 'content-type': 'application/json' });
+  const studioPath = path => `${h.base}${path}${path.includes('?') ? '&' : '?'}surface=studio`;
+  try {
+    const ordinary = { ...chat('s_host', 1, 10), workspaceId: 'private', tools: ['shell'] };
+    assert.equal((await fetch(`${h.base}/api/chats/s_host`, { method: 'PUT', headers: named('host-window', { 'content-type': 'application/json' }), body: JSON.stringify(ordinary) })).status, 200);
+    assert.deepEqual((await (await fetch(studioPath('/api/chats'), { headers: named('studio-window') })).json()).chats, []);
+
+    const session = {
+      ...chat('studio_one', 2, 10), workspaceId: 'private', agent: true, tools: ['shell'],
+      artifacts: ['private'], messages: [{ id: 'm1', role: 'user', content: 'Hello', files: ['private'] }, { id: 'm2', role: 'assistant', content: 'Hi', reasoning: 'Think', tools: ['shell'] }],
+    };
+    const saved = await fetch(studioPath('/api/chats/studio_one'), { method: 'PUT', headers: studioHeaders, body: JSON.stringify(session) });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(Object.keys(await saved.json()).sort(), ['bytes', 'conflict', 'id', 'rev']);
+    const read = await (await fetch(studioPath('/api/chats/studio_one'), { headers: named('studio-window') })).json();
+    assert.deepEqual(read.session, {
+      id: 'studio_one', title: 'Chat studio_one', createdAt: session.createdAt, updatedAt: session.updatedAt,
+      messages: [{ id: 'm1', role: 'user', content: 'Hello' }, { id: 'm2', role: 'assistant', content: 'Hi', reasoning: 'Think' }],
+      tokensIn: 0, tokensOut: 0,
+    });
+    assert.deepEqual((await (await fetch(studioPath('/api/chats'), { headers: named('studio-window') })).json()).chats.map(row => row.id), ['studio_one']);
+    assert.deepEqual((await (await fetch(`${h.base}/api/chats`, { headers: named('host-window') })).json()).chats.map(row => row.id).sort(), ['s_host', 'studio_one']);
+    assert.equal((await (await fetch(`${h.base}/api/chats/s_host`, { headers: named('host-window') })).json()).session.workspaceId, 'private');
+
+    for (const method of ['GET', 'PUT', 'DELETE']) {
+      const response = await fetch(studioPath('/api/chats/s_host'), { method, headers: studioHeaders, ...(method === 'PUT' ? { body: JSON.stringify(ordinary) } : {}) });
+      assert.equal(response.status, 404, method);
+    }
+    assert.equal((await fetch(studioPath('/api/chats/import'), { method: 'POST', headers: studioHeaders, body: JSON.stringify({ sessions: [ordinary] }) })).status, 403);
+    const toolMessage = { ...session, messages: [{ role: 'tool', content: 'private' }] };
+    assert.equal((await fetch(studioPath('/api/chats/studio_one'), { method: 'PUT', headers: studioHeaders, body: JSON.stringify(toolMessage) })).status, 400);
+    assert.deepEqual(await readFile(join(home, 'data', 'chats', 'studio_one.json'), 'utf8').then(JSON.parse).then(row => row.session), read.session);
+
+    assert.deepEqual(await (await fetch(studioPath('/api/chats/studio_one'), { method: 'DELETE', headers: studioHeaders })).json(), { id: 'studio_one', removed: true });
+    assert.deepEqual((await (await fetch(studioPath('/api/chats'), { headers: named('studio-window') })).json()).chats, []);
+    assert.deepEqual((await (await fetch(`${h.base}/api/chats`, { headers: named('host-window') })).json()).chats.map(row => row.id), ['s_host']);
   } finally { await h.stop(); await rm(home, { recursive: true, force: true }).catch(() => {}); }
 });
 

@@ -81,7 +81,7 @@ test('local and Studio event clients receive different projections of the same h
   const hub = new EventHub();
   const server = http.createServer((req, res) => {
     const studio = req.url === '/studio';
-    hub.add(res, studio ? ['native'] : null, studio ? (event, payload) => studioEvent(event, payload) : null);
+    hub.add(res, studio ? ['native', 'chats'] : null, studio ? (event, payload) => studioEvent(event, payload) : null);
   });
   const port = await new Promise(r => server.listen(0, '127.0.0.1', () => r(server.address().port)));
   t.after(() => { server.closeAllConnections(); server.close(); });
@@ -103,7 +103,7 @@ test('local and Studio event clients receive different projections of the same h
     request.on('error', reject);
     t.after(() => request.destroy());
   });
-  const local = read('/local', 2), studio = read('/studio', 1);
+  const local = read('/local', 4), studio = read('/studio', 2);
   while (hub.size !== 2) await pause(20);
   hub.send('native', {
     available: true, repo: '/home/alice/Strata',
@@ -113,11 +113,15 @@ test('local and Studio event clients receive different projections of the same h
     ],
   });
   hub.send('serving', { running: true, baseUrl: 'http://127.0.0.1:8080/v1', localUrl: 'http://127.0.0.1:8080/v1' });
+  hub.send('chats', { id: 's_host', rev: 1, from: 'host-window' });
+  hub.send('chats', { id: 'studio_one', rev: 2 });
   const [localFrames, studioFrames] = await Promise.all([local, studio]);
   assert.equal(localFrames[0].data.repo, '/home/alice/Strata');
   assert.deepEqual(localFrames[0].data.jobs.map(job => job.id), ['local', 'studio']);
   assert.equal(localFrames[1].event, 'serving');
-  assert.deepEqual(studioFrames.map(frame => frame.event), ['native']);
+  assert.deepEqual(localFrames.slice(2).map(frame => frame.data.id), ['s_host', 'studio_one']);
+  assert.deepEqual(studioFrames.map(frame => frame.event), ['native', 'chats']);
   assert.equal(studioFrames[0].data.repo, undefined);
   assert.deepEqual(studioFrames[0].data.jobs.map(job => job.id), ['studio']);
+  assert.deepEqual(studioFrames[1].data, { id: 'studio_one', rev: 2 }, 'ordinary host chat events are suppressed');
 });

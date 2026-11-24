@@ -1,8 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  isStudioChatId,
   studioApiError,
   studioApiResponse,
+  studioChatEnvelope,
+  studioChatEvent,
+  studioChatFrame,
+  studioChatList,
+  studioChatSaveResult,
+  studioChatSession,
+  studioChatTurn,
   studioControlStatus,
   studioEngineFirstRun,
   studioEngineList,
@@ -210,6 +218,70 @@ test('Studio first-run, updates, benchmarks and engine lists expose only safe ma
   assert.equal(engines.families[0].engines[0].can_use, false);
   assert.equal(engines.families[0].engines[0].can_delete, false);
   noPrivatePaths({ firstRun, updates, benchmark, engines });
+});
+
+test('Studio chat storage accepts only the namespace and keeps plain user and assistant messages', () => {
+  assert.equal(isStudioChatId('studio_a'), true);
+  for (const id of ['s_host', 'studio_', 'studio_../x', 'studio_a/b', 'studio_ä']) assert.equal(isStudioChatId(id), false, id);
+  const session = studioChatSession({
+    id: 'studio_one', title: 'Local model', createdAt: '2026-11-24T00:00:00.000Z', updatedAt: '2026-11-24T00:00:01.000Z',
+    tokensIn: 12, tokensOut: 7, workspaceId: 'host-work', remoteModel: { connectionId: 'secret' }, agent: true,
+    messages: [
+      { id: 'm1', role: 'user', content: 'Hello', tools: [{ name: 'shell' }] },
+      { id: 'm2', role: 'assistant', content: 'Hi', reasoning: 'Think', artifacts: ['host.txt'], tools: [{ name: 'read' }] },
+    ],
+  });
+  assert.deepEqual(session, {
+    id: 'studio_one', title: 'Local model', createdAt: '2026-11-24T00:00:00.000Z', updatedAt: '2026-11-24T00:00:01.000Z', tokensIn: 12, tokensOut: 7,
+    messages: [
+      { id: 'm1', role: 'user', content: 'Hello' },
+      { id: 'm2', role: 'assistant', content: 'Hi', reasoning: 'Think' },
+    ],
+  });
+  assert.throws(() => studioChatSession({ id: 's_host', messages: [] }), /studio_ id/);
+  assert.throws(() => studioChatSession({ id: 'studio_one', messages: [{ role: 'tool', content: 'secret' }] }), /user and assistant/);
+
+  const list = studioChatList({ v: 1, chats: [
+    { id: 'studio_one', title: 'Mine', createdAt: 'a', updatedAt: 'b', bytes: 50, workspaceId: 'private' },
+    { id: 's_host', title: 'Host', workspaceId: 'private' },
+  ], damaged: ['s_bad', 'studio_bad'], newer: ['s_next'] });
+  assert.deepEqual(list, { v: 1, chats: [{ id: 'studio_one', title: 'Mine', createdAt: 'a', updatedAt: 'b', bytes: 50 }], damaged: ['studio_bad'], newer: [] });
+  assert.deepEqual(studioChatEnvelope({ rev: 3, savedAt: 'then', session, workspace: 'private' }), { rev: 3, savedAt: 'then', session });
+  assert.deepEqual(studioChatSaveResult({ id: 'studio_one', rev: 4, bytes: 80, conflict: false, path: '/home/alice/private' }), { id: 'studio_one', rev: 4, bytes: 80, conflict: false });
+  assert.deepEqual(studioChatEvent({ id: 'studio_one', rev: 5, from: 'window-A', path: '/home/alice/private' }), { id: 'studio_one', rev: 5 });
+  assert.equal(studioChatEvent({ id: 's_host', rev: 5 }), null);
+});
+
+test('Studio turns discard tools, remote providers, images, workspace, plans and local skills', () => {
+  const turn = studioChatTurn({
+    sessionId: 'studio_one', message: '  Hello  ', thinking: 'Medium', thinkingBudget: 999999,
+    nativeModelId: 'qwen', history: [{ role: 'assistant', content: 'Earlier', tools: ['shell'], artifacts: ['file'] }],
+    agent: true, tools: true, useTools: true, remoteModel: { connectionId: 'host-secret', modelId: 'cloud' },
+    images: ['data:image/png;base64,private'], imageIds: ['upload'], workspaceId: 'host-work',
+    planId: 'plan', goalAction: 'resume', timeSkip: true, skills: ['shell'], selectedSkills: ['shell'], userRules: 'secret',
+  });
+  assert.deepEqual(turn, {
+    sessionId: 'studio_one', message: 'Hello', history: [{ role: 'assistant', content: 'Earlier' }],
+    thinking: 'Medium', thinkingBudget: 262144, nativeModelId: 'qwen', agent: false, tools: false, useTools: false,
+  });
+  assert.throws(() => studioChatTurn({ sessionId: 's_host', message: 'Hello' }), /studio_ id/);
+  assert.throws(() => studioChatTurn({ sessionId: 'studio_one', message: '   ' }), /Write a message/);
+  assert.throws(() => studioChatTurn({ sessionId: 'studio_one', message: 'Hello', history: {} }), /must be a list/);
+  assert.throws(() => studioChatTurn({ sessionId: 'studio_one', message: 'Hello', history: Array(501).fill({ role: 'user', content: 'x' }) }), /too many/);
+});
+
+test('Studio frames keep incremental text and safe metrics while dropping host-only frames and diagnostics', () => {
+  assert.deepEqual(studioChatFrame({ type: 'beat', secret: 'x' }), { type: 'beat' });
+  assert.deepEqual(studioChatFrame({ type: 'delta', text: 'Hello', tools: ['shell'] }), { type: 'delta', text: 'Hello' });
+  assert.deepEqual(studioChatFrame({ type: 'reasoning', text: 'Think', requestId: 'private' }), { type: 'reasoning', text: 'Think' });
+  assert.deepEqual(studioChatFrame({ type: 'start', model: '/home/alice/model', promptTokens: 10, skills: ['shell'] }), { type: 'start', model: '[local path]' });
+  const status = studioChatFrame({ type: 'status', phase: 'answering', seq: 2, code: 'writing', text: 'Failed /srv/private/model', key: '/home/alice/key', values: ['/srv/private/value', 'ok'], tokens: 4, elapsedMs: 20, requestId: 'private' });
+  assert.deepEqual(status, { type: 'status', seq: 2, phase: 'answering', code: 'writing', text: 'Failed [local path]', key: '[local path]', values: ['[local path]', 'ok'], tokens: 4, elapsedMs: 20 });
+  assert.equal(studioChatFrame({ type: 'status', phase: 'tool', text: 'Running shell' }), null);
+  assert.deepEqual(studioChatFrame({ type: 'done', tokensIn: 10, tokensOut: 3, tps: 20, requestId: 'private', tools: ['shell'] }), { type: 'done', tokensIn: 10, tokensOut: 3, tps: 20 });
+  assert.deepEqual(studioChatFrame({ type: 'error', message: 'Failed /home/alice/model', code: 'failed', details: 'STRATA_TOKEN=secret' }), { type: 'error', message: 'Failed [local path]', code: 'failed' });
+  for (const type of ['tool', 'native-tool', 'notice', 'artifact', 'file', 'media', 'agent', 'helper', 'approval', 'unknown']) assert.equal(studioChatFrame({ type, text: 'secret' }), null, type);
+  noPrivatePaths(status);
 });
 
 test('Studio control status and errors retain first-run facts without host paths or credentials', () => {

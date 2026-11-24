@@ -16,6 +16,8 @@ import { useMedia } from '../lib/responsive';
 import { Btn, Dialog, IconBtn, Toasts } from '../components/ui';
 import { Brand } from '../components/Brand';
 import { ChatScreen } from '../screens/Chat';
+import { StudioChat } from '../screens/StudioChat';
+import { startNewStudioChat } from '../lib/studio-chat';
 import { SubagentRow } from '../components/SubagentRow';
 import { api } from '../lib/client';
 import { recordOf, useHelperRecords } from '../lib/helper-records';
@@ -74,7 +76,7 @@ function AppShell() {
           <IconBtn name="panel" title={tr("Open navigation")} onClick={() => setNavOpen(true)}/>
           <Brand variant="lockup" height={24}/>
           <span className="spacer"/>
-          <IconBtn name={studio ? 'models' : 'new-chat'} title={tr(studio ? 'Models' : 'New chat')} onClick={() => studio ? runCommand('models') : runCommand('new')}/>
+          <IconBtn name="new-chat" title={tr('New chat')} onClick={() => studio ? startNewStudioChat() : runCommand('new')}/>
         </div>
         <ConnectionBar />
         {tr(focus && location.route === 'chat' ? <FocusBar /> : null)}
@@ -178,7 +180,7 @@ function RouteView({ route, studio }: {
     route: string;
     studio: boolean;
 }) {
-    if (studio && route === 'chat') return <ModelRunScreen />;
+    if (studio && route === 'chat') return <StudioChat />;
     switch (route) {
         case 'chat':
             return <ChatScreen />;
