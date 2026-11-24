@@ -228,7 +228,7 @@ export interface ServeRequest {
   finishReason?: string | null;
 }
 
-export interface TunnelState { status: 'idle' | 'starting' | 'connected' | 'stopping' | 'error'; mode: 'quick' | 'domain' | null; url: string | null; error: string | null; warning?: string | null; installed: boolean; originUrl: string; connector?: { path: string; version: string | null; source: string; label: string; summary: string } | null; external?: { kind: 'service' | 'process'; others: number[]; own: number[]; message: string } | null; }
+export interface TunnelState { status: 'idle' | 'starting' | 'connected' | 'stopping' | 'error'; mode: 'quick' | 'domain' | null; url: string | null; error: string | null; warning?: string | null; installed: boolean; originUrl?: string; connector?: { path?: string; version: string | null; source?: string; label: string; summary?: string } | null; external?: { kind: 'service' | 'process'; others: number[]; own: number[]; message: string } | null; }
 
 export interface ServingState {
   tunnel?: TunnelState;
@@ -240,7 +240,7 @@ export interface ServingState {
   localUrl?: string;
   port: number;
   endpoints: { openai: string; anthropic: string; models: string };
-  access: { otherDevices: boolean; apiKeySet: boolean; apiKeyHint: string | null; allowOrigin: string };
+  access: { otherDevices?: boolean; apiKeySet: boolean; apiKeyHint?: string | null; allowOrigin?: string };
   stats: { running: number; waiting: number; completed: number; failed: number; tokensOut: number };
   requests: ServeRequest[];
   pauseServing: boolean;

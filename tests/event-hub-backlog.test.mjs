@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import { EventHub, EVENT_BACKLOG_MAX } from '../server/util.mjs';
+import { studioEvent } from '../server/studio-data.mjs';
 
 const FRAME = { rows: 'x'.repeat(100 * 1024) };
 const pause = ms => new Promise(r => setTimeout(r, ms));
@@ -74,4 +75,49 @@ test('a client that reads is not touched: every frame arrives, in order', { time
   for (let i = 0; i < 200; i += 1) hub.send('native', { n: i });
   await done;
   assert.deepEqual(got, Array.from({ length: 200 }, (_, i) => `{"n":${i}}`));
+});
+
+test('local and Studio event clients receive different projections of the same host event', { timeout: 30000 }, async t => {
+  const hub = new EventHub();
+  const server = http.createServer((req, res) => {
+    const studio = req.url === '/studio';
+    hub.add(res, studio ? ['native'] : null, studio ? (event, payload) => studioEvent(event, payload) : null);
+  });
+  const port = await new Promise(r => server.listen(0, '127.0.0.1', () => r(server.address().port)));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const read = (path, count) => new Promise((resolve, reject) => {
+    const frames = [];
+    const request = http.get({ host: '127.0.0.1', port, path }, res => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => {
+        text += chunk;
+        for (const match of [...text.matchAll(/event: ([^\n]+)\ndata: (.*)\n\n/g)]) {
+          frames.push({ event: match[1], data: JSON.parse(match[2]) });
+          text = text.slice(match.index + match[0].length);
+        }
+        if (frames.length === count) { request.destroy(); resolve(frames); }
+      });
+      res.on('error', reject);
+    });
+    request.on('error', reject);
+    t.after(() => request.destroy());
+  });
+  const local = read('/local', 2), studio = read('/studio', 1);
+  while (hub.size !== 2) await pause(20);
+  hub.send('native', {
+    available: true, repo: '/home/alice/Strata',
+    jobs: [
+      { id: 'local', kind: 'install', surface: 'local', state: 'running' },
+      { id: 'studio', kind: 'install', surface: 'studio', state: 'running' },
+    ],
+  });
+  hub.send('serving', { running: true, baseUrl: 'http://127.0.0.1:8080/v1', localUrl: 'http://127.0.0.1:8080/v1' });
+  const [localFrames, studioFrames] = await Promise.all([local, studio]);
+  assert.equal(localFrames[0].data.repo, '/home/alice/Strata');
+  assert.deepEqual(localFrames[0].data.jobs.map(job => job.id), ['local', 'studio']);
+  assert.equal(localFrames[1].event, 'serving');
+  assert.deepEqual(studioFrames.map(frame => frame.event), ['native']);
+  assert.equal(studioFrames[0].data.repo, undefined);
+  assert.deepEqual(studioFrames[0].data.jobs.map(job => job.id), ['studio']);
 });

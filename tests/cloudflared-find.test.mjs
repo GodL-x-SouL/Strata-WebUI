@@ -113,6 +113,7 @@ test('only a tunnel that is clearly Strata’s own (same port, or same token) co
 
 function fakeOrigin() { return { started: 0, async start() { this.started++; }, async stop() {} }; }
 const info = () => ({ path: '/usr/bin/cloudflared', version: '2026.5.0', source: 'path', label: 'found on your PATH' });
+const tunnelToken = tag => Buffer.from(JSON.stringify({ a: 'a'.repeat(32), t: '12345678-1234-1234-1234-123456789abc', s: tag.repeat(32) })).toString('base64url');
 const fake = () => ({ stdout: { on() {} }, stderr: { on() {} }, once() {}, kill() {}, pid: 55 });
 const mk = (originUrl, procs, launch, origin = fakeOrigin()) => createCloudflare({ origin, originUrl, hasKey: () => true, locate: async () => '/usr/bin/cloudflared', connectorInfo: info,
   findRunning: async () => procs.length ? { running: true, kind: 'process', pids: procs.map(p => p.pid), procs } : { running: false, kind: null, pids: [], procs: [] }, launch, timeoutMs: 50 });
@@ -138,12 +139,13 @@ test('Strata’s own tunnel (same port) already running is not doubled; the same
   await assert.rejects(same.start({ mode: 'quick' }), /Strata’s tunnel for this address is already running \(PID 31\), so Strata did not start a second one/);
   assert.equal(launched, 0);
   assert.equal(origin.started, 0, 'the private origin is not opened either');
-  const token = 'A'.repeat(30);
+  const token = tunnelToken('A');
   const sameToken = mk('http://127.0.0.1:8793', [{ pid: 32, command: `cloudflared tunnel run --token ${token}` }], () => { launched++; return fake(); }, origin);
   await assert.rejects(sameToken.start({ mode: 'domain', hostname: 'ai.example.com', token }), /already running \(PID 32\)/);
   assert.equal(launched, 0);
   const spawned = [];
-  const other = mk('http://127.0.0.1:8793', [{ pid: 33, command: 'cloudflared tunnel run --token ' + 'B'.repeat(30) }], () => { spawned.push(1); return fake(); }, origin);
+  const otherToken = tunnelToken('B');
+  const other = mk('http://127.0.0.1:8793', [{ pid: 33, command: 'cloudflared tunnel run --token ' + otherToken }], () => { spawned.push(1); return fake(); }, origin);
   await other.start({ mode: 'domain', hostname: 'ai.example.com', token });
   assert.equal(spawned.length, 1, 'a different tunnel token is somebody else’s tunnel');
   await other.stop();

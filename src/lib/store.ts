@@ -67,6 +67,7 @@ import type {
   ToolDraft,
 } from './types';
 import { navigate, type Route } from './router';
+import { loadAppMode } from './app-mode';
 import { estimate, execution, contextTokens } from './experience';
 
 export interface Toast {
@@ -85,6 +86,8 @@ export interface AppState {
   configDraft: string | null;
   navOpen: boolean;
   ready: boolean;
+  /** The authenticated, remote-safe model manager rather than the full local app. */
+  studio: boolean;
   connection: 'connecting' | 'live' | 'offline';
   theme: 'dark' | 'light' | 'system';
   contrast: 'standard' | 'increased';
@@ -348,6 +351,7 @@ let state: AppState = {
   configDraft: (() => { try { return sessionStorage.getItem('strata.config-draft.v1'); } catch { return null; } })(),
   navOpen: false,
   ready: false,
+  studio: false,
   connection: 'connecting',
   shareTelemetry: prefs.shareTelemetry,
   theme: prefs.theme,
@@ -1049,30 +1053,34 @@ let closeEvents: (() => void) | null = null;
 export async function bootstrap() {
   applyPrefs();
   try {
+    const studio = (await loadAppMode())?.mode === 'studio';
     let chatsTimer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      loadChatsFromHost(),
-      new Promise<never>((_, reject) => { chatsTimer = setTimeout(() => reject(new Error('The chats did not load in time')), bootstrapTiming.timeoutMs); }),
-    ]).catch(() => { sessionWriter.enable(); }).finally(() => clearTimeout(chatsTimer));
+    if (!studio) {
+      await Promise.race([
+        loadChatsFromHost(),
+        new Promise<never>((_, reject) => { chatsTimer = setTimeout(() => reject(new Error('The chats did not load in time')), bootstrapTiming.timeoutMs); }),
+      ]).catch(() => { sessionWriter.enable(); }).finally(() => clearTimeout(chatsTimer));
+    }
     // Only what the first screen cannot do without holds up 'live'; the rest is read at the same time and fills in when it arrives.
     const soft = <T,>(path: string) => getWithRetry<T>(path).catch(() => null);
     const late = {
       hardware: soft<Hardware>('/api/hardware'),
       monitor: soft<MonitorState>('/api/monitor'),
-      skills: soft<Skill[]>('/api/skills'),
-      providers: soft<ModelProviders>('/api/model-providers'),
-      imageModels: soft<ImageModelLibrary>('/api/image-models'),
-      runtime: soft<RuntimeModels>('/api/runtime'),
+      skills: studio ? Promise.resolve([]) : soft<Skill[]>('/api/skills'),
+      providers: studio ? Promise.resolve(null) : soft<ModelProviders>('/api/model-providers'),
+      imageModels: studio ? Promise.resolve(null) : soft<ImageModelLibrary>('/api/image-models'),
+      runtime: studio ? Promise.resolve(null) : soft<RuntimeModels>('/api/runtime'),
     };
     const [setup, library, engine, serving, workspaceState] = await Promise.all([
       getWithRetry<SetupState>('/api/setup'),
       getWithRetry<ModelLibrary>('/api/models'),
-      getWithRetry<EngineConfig>('/api/engine'),
+      studio ? Promise.resolve(null) : getWithRetry<EngineConfig>('/api/engine'),
       getWithRetry<ServingState>('/api/serving'),
-      getWithRetry<{ workspaces: Workspace[] }>('/api/workspaces'),
+      studio ? Promise.resolve({ workspaces: [] as Workspace[] }) : getWithRetry<{ workspaces: Workspace[] }>('/api/workspaces'),
     ]);
     set({
       ready: true,
+      studio,
       setup,
       library: libraryResponse(library),
       engine,
@@ -1088,7 +1096,7 @@ export async function bootstrap() {
     void late.providers.then(providers => { if (providers) applyProviders(providers); });
     void late.imageModels.then(imageModels => { if (imageModels) set({ imageModels }); });
     void late.runtime.then(runtime => { if (runtime) set({ runtime }); });
-    if (!shellAnnounced) { shellAnnounced = true; void announcePortNotice(); rememberShellLanguage(state.language); }
+    if (!studio && !shellAnnounced) { shellAnnounced = true; void announcePortNotice(); rememberShellLanguage(state.language); }
     closeEvents?.();
     let reconnect = false;
     closeEvents = onEvent(applyEvent, (status) => {
@@ -1104,6 +1112,7 @@ export async function bootstrap() {
       set({ connection: status });
     });
     if (!setup.complete && !setup.dismissed && !window.location.hash.includes('setup')) navigate('setup');
+    else if (studio && !['models', 'tuning', 'serving', 'monitor', 'setup'].includes(window.location.hash.replace(/^#\/?/, '').split('/')[0])) navigate('models');
   } catch (err) {
     set({ ready: true, connection: 'offline' });
     pushToast(

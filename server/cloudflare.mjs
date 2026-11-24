@@ -1,5 +1,8 @@
 /** A supervised Cloudflare connector with a private, inference-only origin. */
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { probe, which } from './util.mjs';
 import { classifyRunning, describeConnector, otherTunnelMessage, ownTunnelMessage } from './cloudflared-find.mjs';
 
@@ -10,12 +13,49 @@ export function tunnelHostname(value) {
   if (hostname.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(hostname)) throw new Error('Enter a hostname such as ai.example.com, without https:// or a path.');
   return hostname;
 }
-export function createCloudflare({ origin, originUrl, hasKey, changed = () => {}, launch = spawn, locate = async () => process.platform === 'win32' ? (await probe('where.exe', ['cloudflared'])).split(/\r?\n/)[0] || null : which('cloudflared'), prepareConnector = null, connectorInfo = () => null, findRunning = async () => ({ running: false, kind: null, pids: [] }), timeoutMs = 45000 }) {
-  let binary = null, other = null, child = null, timer = null, busy = false, generation = 0;
+
+function tunnelCredentials(token) {
+  let decoded;
+  try { decoded = JSON.parse(Buffer.from(token, 'base64url').toString('utf8')); }
+  catch { throw new Error('That Cloudflare tunnel token is not valid. Copy the token from your Cloudflare tunnel setup.'); }
+  const account = decoded?.a, id = decoded?.t, secret = decoded?.s;
+  if (typeof account !== 'string' || !/^[a-f0-9]{32}$/i.test(account) ||
+      typeof id !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id) ||
+      typeof secret !== 'string' || !/^[A-Za-z0-9+/=_-]{20,128}$/.test(secret))
+    throw new Error('That Cloudflare tunnel token is not valid. Copy the token from your Cloudflare tunnel setup.');
+  return { AccountTag: account, TunnelID: id, TunnelSecret: secret };
+}
+
+/** A token's remotely managed ingress is not trusted: cloudflared gets local ingress pinned to this origin. */
+function writeTunnelConfig({ token, hostname, originUrl }) {
+  const credentials = tunnelCredentials(token);
+  const directory = mkdtempSync(join(tmpdir(), 'strata-tunnel-'));
+  const credentialsFile = join(directory, 'credentials.json');
+  const configFile = join(directory, 'config.yml');
+  try {
+    writeFileSync(credentialsFile, JSON.stringify(credentials), { mode: 0o600, flag: 'wx' });
+    const config = [
+      `tunnel: ${JSON.stringify(credentials.TunnelID)}`,
+      `credentials-file: ${JSON.stringify(credentialsFile)}`,
+      'ingress:',
+      `  - hostname: ${JSON.stringify(hostname)}`,
+      `    service: ${JSON.stringify(originUrl)}`,
+      '  - service: http_status:404',
+    ].join('\n') + '\n';
+    writeFileSync(configFile, config, { mode: 0o600, flag: 'wx' });
+    return { directory, configFile };
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export function createCloudflare({ origin, originUrl, hasKey, changed = () => {}, launch = spawn, locate = async () => process.platform === 'win32' ? (await probe('where.exe', ['cloudflared'])).split(/\r?\n/)[0] || null : which('cloudflared'), prepareConnector = null, connectorInfo = () => null, findRunning = async () => ({ running: false, kind: null, pids: [] }), timeoutMs = 45000, urlSuffix = '/v1', warning = NO_KEY_TUNNEL_WARNING }) {
+  let binary = null, other = null, child = null, timer = null, busy = false, generation = 0, tunnelFiles = null;
   let value = { status: 'idle', mode: null, url: null, error: null };
   const state = () => {
     const info = binary ? connectorInfo() : null;
-    return { ...value, warning: value.status === 'connected' && !hasKey() ? NO_KEY_TUNNEL_WARNING : null, installed: !!binary, originUrl, connector: info ? { path: info.path, version: info.version, source: info.source, label: info.label, summary: describeConnector(info) } : null, external: other?.running ? externalState() : null };
+    return { ...value, warning: value.status === 'connected' && !hasKey() ? warning : null, installed: !!binary, originUrl, connector: info ? { path: info.path, version: info.version, source: info.source, label: info.label, summary: describeConnector(info) } : null, external: other?.running ? externalState() : null };
   };
   const update = patch => { value = { ...value, ...patch }; changed(state()); };
   function externalState(token = '') {
@@ -45,6 +85,7 @@ export function createCloudflare({ origin, originUrl, hasKey, changed = () => {}
         processRef.kill('SIGTERM');
       });
     }
+    if (tunnelFiles) { const files = tunnelFiles; tunnelFiles = null; try { rmSync(files.directory, { recursive: true, force: true }); } catch { /* the process is already stopped */ } }
     await origin.stop();
   }
   async function fail(message, id) {
@@ -66,12 +107,12 @@ export function createCloudflare({ origin, originUrl, hasKey, changed = () => {}
       if (!binary) throw new Error('The connector could not be prepared automatically. Retry connector setup.');
       // Strata's own tunnel (same port or same token) is never doubled up. Other cloudflared processes serve other tunnels and are left alone.
       if ((await lookForOther())?.running) { const { own } = classifyRunning(other, { originUrl, token }); if (own.length) throw new Error(ownTunnelMessage(own)); }
+      if (hostname) tunnelFiles = writeTunnelConfig({ token, hostname, originUrl });
       await origin.start();
       // Tokens never appear in command arguments, logs, saved settings, or API responses.
       const env = { ...process.env };
       for (const key of Object.keys(env)) if (key.startsWith('TUNNEL_')) delete env[key];
-      if (token) env.TUNNEL_TOKEN = token;
-      const args = ['tunnel', '--no-autoupdate', '--loglevel', 'info', '--grace-period', '1s', ...(hostname ? ['run'] : ['--url', originUrl])];
+      const args = ['tunnel', ...(tunnelFiles ? ['--config', tunnelFiles.configFile] : []), '--no-autoupdate', '--loglevel', 'info', '--grace-period', '1s', ...(hostname ? ['run'] : ['--url', originUrl])];
       child = launch(binary, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
       let tail = '', publicUrl = hostname ? `https://${hostname}` : null, registered = false;
       const read = chunk => {
@@ -80,7 +121,7 @@ export function createCloudflare({ origin, originUrl, hasKey, changed = () => {}
         const match = tail.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com\b/);
         if (!hostname && match) publicUrl = match[0];
         if (/Registered tunnel connection/i.test(tail)) registered = true;
-        if (publicUrl && registered && value.status !== 'connected') { clearTimeout(timer); update({ status: 'connected', url: `${publicUrl}/v1` }); }
+        if (publicUrl && registered && value.status !== 'connected') { clearTimeout(timer); update({ status: 'connected', url: `${publicUrl}${urlSuffix}` }); }
       };
       child.stdout?.on('data', read); child.stderr?.on('data', read);
       child.once('error', () => { void fail('Cloudflared could not start. Check the installation and try again.', id); });

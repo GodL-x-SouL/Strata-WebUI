@@ -73,7 +73,8 @@ test('DL99: an install that ended with every file in, for a model the missing en
   // the wizard shows the owner's sentence (11-15) for that case, through the translation catalog
   const page = readFileSync(new URL('../src/components/GuidedSetup.tsx', import.meta.url), 'utf8');
   assert.match(page, /engineNotReadyAfterInstall\(installJob\?\.state, installed\?\.ready, (?:isHy4Selected \? true : )?native\?\.engine\?\.usable\) \? /, 'hooked to the install job, the model and the engine');
-  assert.ok(page.includes(`tr("${NOT_READY}")`));
+  assert.ok(page.includes(NOT_READY), 'the local Settings path is still available');
+  assert.ok(page.includes('tr(studio ? "Your model is downloaded, but the engine for this PC isn’t ready yet. Choose Connect engine to install it here." :'), 'Studio points to its in-page engine card');
   assert.equal(lib.tr(NOT_READY), NOT_READY);
   // all nine languages have it (scripts/make-engine-locales.py)
   const en = JSON.parse(readFileSync(new URL('../src/locales/engine-en.json', import.meta.url), 'utf8'));

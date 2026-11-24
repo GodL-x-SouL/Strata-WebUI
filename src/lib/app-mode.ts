@@ -3,7 +3,7 @@ import { api } from './client';
 
 /** Which window shows the page: the app window ('window'), a browser tab ('browser'), or neither (a host nobody started: null). */
 export interface AppMode {
-  mode: 'window' | 'browser' | null;
+  mode: 'window' | 'browser' | 'studio' | null;
   reason: string | null;
   canQuit: boolean;
   appUpdate: 'available' | 'unavailable';

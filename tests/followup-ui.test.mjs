@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { transform } from 'esbuild';
 import { createCloudflare, tunnelHostname } from '../server/cloudflare.mjs';
@@ -29,16 +30,40 @@ test('quick tunnel publishes its URL only after registration, and stops its priv
   await f.connector.stop();
   assert.equal(f.connector.state().status, 'idle'); assert.equal(f.stopped(), 1);
 });
-test('domain tunnel validates hostnames and keeps the token out of arguments and state', async () => {
+test('domain tunnel pins local ingress, keeps the token out of arguments and state, and removes its private files', async () => {
   for (const value of ['https://ai.example.com', 'example.com/path', 'localhost', 'ai.example.com;echo x']) assert.throws(() => tunnelHostname(value));
-  const f = fixture(), token = 'test-only-tunnel-token-12345';
+  const f = fixture();
+  const credentials = { a: 'a'.repeat(32), t: '12345678-1234-1234-1234-123456789abc', s: 's'.repeat(32) };
+  const token = Buffer.from(JSON.stringify(credentials)).toString('base64url');
   await f.connector.start({ mode: 'domain', hostname: 'ai.example.com', token });
-  assert.equal(f.launched()[2].env.TUNNEL_TOKEN, token);
-  assert.ok(!JSON.stringify(f.launched()[1]).includes(token));
+  const [, args, options] = f.launched();
+  assert.equal(options.env.TUNNEL_TOKEN, undefined);
+  assert.ok(!JSON.stringify(f.launched()).includes(token));
   assert.ok(!JSON.stringify(f.connector.state()).includes(token));
+  const configFile = args[args.indexOf('--config') + 1];
+  const directory = dirname(configFile);
+  const config = await readFile(configFile, 'utf8');
+  const saved = JSON.parse(await readFile(join(directory, 'credentials.json'), 'utf8'));
+  assert.deepEqual(saved, { AccountTag: credentials.a, TunnelID: credentials.t, TunnelSecret: credentials.s });
+  assert.match(config, /tunnel: "12345678-1234-1234-1234-123456789abc"/);
+  assert.match(config, /hostname: "ai\.example\.com"/);
+  assert.match(config, /service: "http:\/\/127\.0\.0\.1:8793"/);
+  assert.match(config, /- service: http_status:404/);
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(configFile)).mode & 0o777, 0o600);
+    assert.equal((await stat(join(directory, 'credentials.json'))).mode & 0o777, 0o600);
+  }
   f.child.stderr.emit('data', 'Registered tunnel connection\n');
   assert.equal(f.connector.state().url, 'https://ai.example.com/v1');
   await f.connector.stop();
+  await assert.rejects(stat(directory), { code: 'ENOENT' });
+});
+test('an invalid domain token leaves no origin or tunnel files behind', async () => {
+  const f = fixture();
+  await assert.rejects(f.connector.start({ mode: 'domain', hostname: 'ai.example.com', token: 'A'.repeat(30) }), /token is not valid/i);
+  assert.equal(f.launched(), undefined);
+  assert.equal(f.stopped(), 1);
+  assert.equal(f.connector.state().status, 'error');
 });
 test('missing prerequisites and connector failure leave no inference listener running', async () => {
   const noKey = fixture({ hasKey: () => false });          // without a key the tunnel starts (owner decision, 0.2.2) and the state carries a warning

@@ -27,7 +27,7 @@ import type { ImageModelChoice, RuntimeModels, RuntimeModel } from '../lib/types
 import { useNative, nativeSettled, subscribeNative } from '../lib/native';
 import { NativeModels } from '../components/NativeModels';
 import { NativeLocalModel } from '../components/NativeLocalModel';
-import { parseLocation } from '../lib/router';
+import { href, parseLocation } from '../lib/router';
 type Issue = {
     level: 'error' | 'warn';
     message: string;
@@ -35,16 +35,19 @@ type Issue = {
 type RunStage = 'idle' | 'checking' | 'loading' | 'ready';
 export function ModelRunScreen() {
     const native = useNative();
+    const studio = useStore(s => s.studio);
     const settled = useSyncExternalStore(subscribeNative, nativeSettled);
     const location = parseLocation(window.location.hash), entry = location.param;
-    const [other, setOther] = useState(entry === 'local' || entry === 'local-import'), [importFirst, setImportFirst] = useState(entry === 'local-import');
+    const [other, setOther] = useState(!studio && (entry === 'local' || entry === 'local-import')), [importFirst, setImportFirst] = useState(!studio && entry === 'local-import');
     // Before the engine's answer arrives the page would show the bundled Starter and then jump to the installed model (#3740): show a neutral placeholder instead.
     if (!native && !settled)
         return <div className="main__body"><div className="wrap stack" role="status" aria-label={tr("Loading…")}><div className="skel" style={{ height: 20, width: '60%' }}/><div className="skel" style={{ height: 20, width: '80%' }}/><div className="skel" style={{ height: 20, width: '70%' }}/></div></div>;
     if (native && other)
         return <NativeLocalModel onBack={() => { setOther(false); setImportFirst(false); }}/>;
     if (native && !other)
-        return <NativeModels onOtherModels={() => setOther(true)} onImport={() => { setImportFirst(true); setOther(true); }}/>;
+        return <NativeModels onOtherModels={() => { if (!studio) setOther(true); }} onImport={studio ? undefined : () => { setImportFirst(true); setOther(true); }}/>;
+    if (studio)
+        return <Screen title={tr("Models")}><div className="stack"><h2 className="h3">{tr("Set up Strata")}</h2><p className="muted">{tr("Studio could not reach the model manager. Run setup to check the engine and try again.")}</p><a className="st-btn st-btn--primary" href={href('setup')}>{tr("Open setup")}</a></div></Screen>;
     return <><LegacyModelRunScreen importFirst={importFirst} initialVariant={location.query.get('variant') ?? undefined}/>{tr(other ? <button className="st-btn native-return" onClick={() => setOther(false)}>{tr("Back")}</button> : null)}</>;
 }
 function LegacyModelRunScreen({ importFirst = false, initialVariant }: {

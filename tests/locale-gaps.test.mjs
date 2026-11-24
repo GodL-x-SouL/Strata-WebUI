@@ -48,6 +48,24 @@ test('the fix catalogs have the same keys and placeholders in all nine languages
   }
 });
 
+test('the Studio manager strings translate in every language', async () => {
+  const en = await read('en');
+  const keys = Object.keys(en).filter(key => key.startsWith('studio'));
+  assert.equal(keys.length, 27);
+  for (const language of languages) {
+    const catalog = await read(language);
+    for (const key of keys) {
+      assert.ok(catalog[key], `${language} has ${key}`);
+      if (language !== 'en' && !['studioBrand', 'studioNav', 'studioDomain'].includes(key)) assert.notEqual(catalog[key], en[key], `${language} translates ${key}`);
+    }
+  }
+  for (const language of languages.filter(value => value !== 'en')) {
+    setTranslationLanguage(language);
+    assert.notEqual(tr(en.studioEngineNotReady), en.studioEngineNotReady, `${language} translates the Studio engine warning`);
+  }
+  setTranslationLanguage('en');
+});
+
 test('the /plan, /research and /new hints and the four "Open ..." hints are translated (#3479, #3825)', () => {
   for (const language of ['zh', 'ru']) {
     setTranslationLanguage(language);

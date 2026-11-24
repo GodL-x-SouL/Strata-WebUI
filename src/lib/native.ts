@@ -84,4 +84,22 @@ export async function nativeAction<T=unknown>(path:string,body:unknown={}){const
  if(state&&job&&typeof job.id==='string'&&path==='operations'&&!state.jobs.some(j=>j.id===job.id)){state={...state,jobs:[...state.jobs,job]};listeners.forEach(fn=>fn());}
  await refreshNative(true);return result;}
 
+export async function removeNativeModel(model: string, { attempts = 600, pollMs = 500 } = {}) {
+  const job = await nativeAction<NativeJob>('operations', { kind: 'remove', args: { model } });
+  for (let i = 0; i < attempts; i++) {
+    await new Promise(resolve => setTimeout(resolve, pollMs));
+    await refreshNative(true);
+    const current = nativeState()?.jobs.find(j => j.id === job.id);
+    if (!current || current.state === 'running') continue;
+    if (current.state === 'error') throw new Error(current.error ?? 'Could not delete this version.');
+    if (current.state === 'cancelled') throw new Error('Deletion was cancelled. Check Models and try again.');
+    if (current.state !== 'done') throw new Error('The host did not confirm that deletion finished.');
+    const latest = nativeState();
+    if (latest?.error) throw new Error(`Could not confirm deletion: ${latest.error}`);
+    if (!latest?.available || !latest.installed) throw new Error('Could not confirm deletion because the model list did not load.');
+    if (!latest.installed.models.some(entry => entry.model === model)) return;
+  }
+  throw new Error('The host did not confirm that this version was deleted. Check Models and try again.');
+}
+
 export {nativeVersionLabel} from './native-catalog';

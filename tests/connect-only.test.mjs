@@ -50,7 +50,7 @@ test('when setup cannot be saved, nothing opens and nothing is asked for', async
 test('the link and its muted line are in the footer every card state shares', () => {
   const s = src('src/components/EngineFirstRun.tsx');
   const footer = s.slice(s.indexOf('<footer className="onboard-footer onboard-footer--welcome">{actions}'));
-  assert.match(footer, /\{actions\}<button type="button" className="onboard-continue-anyway" disabled=\{busy \|\| running\} onClick=\{\(\) => void connectOnlyClick\(\)\}>\{tr\("Only connect to Strata on another computer"\)\}<\/button><small>\{tr\("Nothing is downloaded\. You can add the engine later from the Models page\."\)\}<\/small><\/footer>/);
+  assert.match(footer, /\{actions\}\{tr\(!studio \? <button type="button" className="onboard-continue-anyway" disabled=\{busy \|\| running\} onClick=\{\(\) => void connectOnlyClick\(\)\}>\{tr\("Only connect to Strata on another computer"\)\}<\/button> : null\)\}<small>\{tr\("Nothing is downloaded\. You can add the engine later from the Models page\."\)\}<\/small><\/footer>/);
   // the footer follows the branch that sets `actions` for offer, offline, error (the list could not be read), wrong make and the rest (none, installed, unavailable)
   const branch = s.slice(s.indexOf("if (info.status === 'offer' && info.offer)"), s.indexOf('<footer className="onboard-footer onboard-footer--welcome">{actions}'));
   assert.equal((branch.match(/actions = /g) ?? []).length, 5, 'every state sets its actions and so gets the footer');

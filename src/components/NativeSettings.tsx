@@ -5,6 +5,7 @@ import { describeChange, type TunedChange } from '../lib/tune-values';
 import { useEffect, useState } from 'react';
 import { api } from '../lib/client';
 import { refreshNative, useNative, type NativeField } from '../lib/native';
+import { useStore } from '../lib/store';
 import { Btn, ErrorNotice, Select } from './ui';
 import { draftingChoices } from '../lib/drafting';
 import { NativeMcpEditor } from './NativeMcpEditor';
@@ -40,6 +41,7 @@ export function NativeSettings({ model }: {
     model: string;
 }) {
     const native = useNative();
+    const studio = useStore(s => s.studio);
     const [revision,setRevision]=useState(0);
     const [hints, setHints] = useState<Record<string, string>>({});   // a field's hint worded for this model (the Drafting size)
     const [switches, setSwitches] = useState<SpeedSwitch[]>([]);   // the speed switches that apply to this model on this PC
@@ -69,13 +71,13 @@ export function NativeSettings({ model }: {
             setValues(value.values);
             setText(JSON.stringify(value.values, null, 2));
             setMcp(JSON.stringify(value.mcp ?? {}, null, 2));
-            setOriginal(JSON.stringify({ values: value.values, mcp: value.mcp ?? {} }));
+            setOriginal(JSON.stringify(studio ? { values: value.values } : { values: value.values, mcp: value.mcp ?? {} }));
         }).catch(e => {
             if (active)
                 setError(e.message);
         });
         return () => { active = false; };
-    }, [model,revision]);
+    }, [model,revision,studio]);
     const change = (id: string, value: any) => { const next = { ...values, [id]: value }; setValues(next); setText(JSON.stringify(next, null, 2)); setNotice(''); };
     /** The default removes the switch's environment entries, the other state writes them: the model's file then carries nothing for a default launch. */
     const changeSwitch = (sw: SpeedSwitch, on: boolean) => { const env = { ...(values.env ?? {}) }; const write = on !== (sw.default === 'on'); for (const [name, value] of Object.entries(sw.env)) { if (write) env[name] = value; else delete env[name]; } if (!write) for (const name of Object.keys(sw.legacy ?? {})) delete env[name]; change('env', env); };
@@ -84,16 +86,15 @@ export function NativeSettings({ model }: {
         setError('');
         try {
             const parsed = nativeSettingsValues(tab === 'json' ? JSON.parse(text) : values);
-            const tools = JSON.parse(mcp);
             const input = await api.patch<{
                 values: Record<string, any>;
                 mcp: Record<string, any>;
-            }>(`/api/native/models/${model}/settings`, { values: parsed, mcp: tools });
+            }>(`/api/native/models/${model}/settings`, studio ? { values: parsed } : { values: parsed, mcp: JSON.parse(mcp) });
             const result = nativeSettingsResponse(input);
             setValues(result.values);
             setMcp(JSON.stringify(result.mcp, null, 2));
             setText(JSON.stringify(result.values, null, 2));
-            setOriginal(JSON.stringify({ values: result.values, mcp: result.mcp }));
+            setOriginal(JSON.stringify(studio ? { values: result.values } : { values: result.values, mcp: result.mcp }));
             setNotice('Saved. Load the model again to apply these settings. A backup of the previous configuration was kept.');
             await refreshNative(true);
         }
@@ -118,7 +119,7 @@ export function NativeSettings({ model }: {
     }
     const dirty = (() => {
         try {
-            return original !== JSON.stringify({ values: tab === 'json' ? JSON.parse(text) : values, mcp: JSON.parse(mcp) });
+            return original !== JSON.stringify(studio ? { values: tab === 'json' ? JSON.parse(text) : values } : { values: tab === 'json' ? JSON.parse(text) : values, mcp: JSON.parse(mcp) });
         }
         catch {
             return true;
@@ -133,15 +134,15 @@ export function NativeSettings({ model }: {
     const isInkling = family === INKLING_FAMILY || /^inkling-2-mini/i.test(model);
     const draftingOpts = isHy4 ? ['dfly2', 'off'] : isInkling ? ['dspark', 'off'] : draftingChoices(family, native?.capabilities?.dflash2);
     const draftingOffered = !!draftingOpts;
-    const rows = (native?.fields ?? []).filter(f => (f.id !== 'drafting' || draftingOffered) && (!isHy4 || !HY4_HIDDEN_FIELDS.has(f.id)) && (!isInkling || !INKLING_HIDDEN_FIELDS.has(f.id)) && `${tr(f.label)} ${f.id} ${tr(f.group)}`.toLowerCase().includes(query.toLowerCase())).map(f => f.id === 'drafting' && draftingOpts ? { ...f, choices: draftingOpts } : f);
+    const rows = (native?.fields ?? []).filter(f => (f.id !== 'drafting' || draftingOffered) && (!studio || f.group !== 'Tools') && (!isHy4 || !HY4_HIDDEN_FIELDS.has(f.id)) && (!isInkling || !INKLING_HIDDEN_FIELDS.has(f.id)) && `${tr(f.label)} ${f.id} ${tr(f.group)}`.toLowerCase().includes(query.toLowerCase())).map(f => f.id === 'drafting' && draftingOpts ? { ...f, choices: draftingOpts } : f);
     const switchRows = switches.filter(sw => `${tr(sw.label)} ${sw.id} ${tr(switchGroup(sw))}`.toLowerCase().includes(query.toLowerCase()));
     // A choice switch (owner, 0.2.16: STRATA_ROUTE_TAIL_SKIP): the default writes no entry, every other choice writes its value (src/lib/speed-choice.ts). 0.2.17: the default is Off, On is 7.
     const choiceRow = (sw: SpeedSwitch) => { const known = choiceValue(sw, values.env), numbered = isNumberChoice(sw, known);
         return <label className="native-setting-row" key={sw.id}><span><strong>{tr(sw.label)}</strong><small>{tr(sw.hint)}</small>{tr(numbered && sw.choiceNote ? <small>{tr(sw.choiceNote)}</small> : null)}</span><Select ariaLabel={tr(sw.label)} value={known} options={choiceOptions(sw)} onChange={v => change('env', withChoice(sw, values.env, v))}/></label>; };
     const switchRow = (sw: SpeedSwitch) => sw.choices?.length ? choiceRow(sw) : <label className="native-setting-row" key={sw.id}><span><strong>{tr(sw.label)}</strong><small>{tr(sw.hint)}</small></span><Select ariaLabel={tr(sw.label)} value={switchIsOn(sw, values.env) ? 'on' : 'off'} options={sw.words ? [{ value: sw.default, label: sw.words[sw.default] }, { value: sw.default === 'on' ? 'off' : 'on', label: sw.words[sw.default === 'on' ? 'off' : 'on'] }] : sw.default === 'on' ? [{ value: 'on', label: 'On (recommended)' }, { value: 'off', label: 'Off' }] : [{ value: 'off', label: 'Off (recommended)' }, { value: 'on', label: 'On' }]} onChange={v => changeSwitch(sw, v === 'on')}/></label>;
-    return <details className="native-settings"><summary>{tr("Native engine settings")}</summary>{tr(tuned?.changed?.length ? <div className="native-tuned"><p className="small"><strong>{tr("Your tuning '{0}' sets", [tuned.preset?.name ?? ''])}</strong></p><ul>{tuned.changed.map(c => { const d = describeChange(c); return <li key={c.flag}><span>{d.name}</span><b>{d.now || tr('off')}</b>{d.was !== null ? <small className="muted">{tr("was {0}", [d.was])}</small> : null}</li>; })}</ul></div> : null)}<p className="small muted">{tr(!original ? 'Reading saved settings… ' : '')}{tr("Settings for this model. Blank values use Strata\u2019s defaults.")}</p><div className="editor-tabs" role="tablist" aria-label={tr("Native settings editor")}>{tr(['fields', 'json', 'tools'].map(t => <button key={t} role="tab" aria-selected={tab === t} onClick={() => chooseTab(t)}>{tr(t === 'fields' ? 'Parameters' : t === 'json' ? 'JSON' : 'MCP tools')}</button>))}</div>
+    return <details className="native-settings"><summary>{tr("Native engine settings")}</summary>{tr(tuned?.changed?.length ? <div className="native-tuned"><p className="small"><strong>{tr("Your tuning '{0}' sets", [tuned.preset?.name ?? ''])}</strong></p><ul>{tuned.changed.map(c => { const d = describeChange(c); return <li key={c.flag}><span>{d.name}</span><b>{d.now || tr('off')}</b>{d.was !== null ? <small className="muted">{tr("was {0}", [d.was])}</small> : null}</li>; })}</ul></div> : null)}<p className="small muted">{tr(!original ? 'Reading saved settings… ' : '')}{tr("Settings for this model. Blank values use Strata\u2019s defaults.")}</p><div className="editor-tabs" role="tablist" aria-label={tr("Native settings editor")}>{tr((studio ? ['fields'] : ['fields', 'json', 'tools']).map(t => <button key={t} role="tab" aria-selected={tab === t} onClick={() => chooseTab(t)}>{tr(t === 'fields' ? 'Parameters' : t === 'json' ? 'JSON' : 'MCP tools')}</button>))}</div>{tr(studio ? <p className="small muted">{tr("Local programs, engine arguments and advanced environment flags are edited only on the computer running Strata.")}</p> : null)}
   {tr(tab === 'fields' ? <><input className="st-input" type="search" aria-label={tr("Search native parameters")} placeholder={tr("Search parameters…")} value={query} onChange={e => setQuery(e.target.value)}/>{tr(['Responses', 'GPU & memory', 'Serving', 'Image reading', 'Tools', 'Recovery'].map(group => rows.some(f => f.group === group) || switchRows.some(sw => switchGroup(sw) === group) ? <section className="native-settings-group" key={group}><h3 className="h4">{tr(group)}</h3>{tr(rows.filter(f => f.group === group).map(f => <label className="native-setting-row" key={f.id}><span><strong>{tr(f.label)}</strong>{tr(f.supported === false ? <small>{tr("Requires a newer Strata installation.")}</small> : f.hint ? <small>{tr(hints[f.id] ?? f.hint)}</small> : null)}</span><NativeFieldInput field={f} value={values[f.id]} onChange={v => change(f.id, v)}/></label>))}{tr(switchRows.filter(sw => switchGroup(sw) === group).map(switchRow))}</section> : null))}{tr(switchRows.some(sw => switchGroup(sw) === 'Speed') ? <section className="native-settings-group"><h3 className="h4">{tr("Speed")}</h3>{tr(switchRows.filter(sw => switchGroup(sw) === 'Speed').map(switchRow))}</section> : null)}<section className="native-settings-group"><h3 className="h4">{tr("Sampling")}</h3>{tr([['temperature', 'Temperature'], ['top_p', 'Top-p'], ['top_k', 'Top-k'], ['min_p', 'Min-p'], ['repetition_penalty', 'Repetition penalty'], ['presence_penalty', 'Presence penalty'], ['frequency_penalty', 'Frequency penalty'], ['penalty_last_n', 'Penalty window'], ['seed', 'Seed']].map(([id, label]) => <label className="native-setting-row" key={id}><span><strong>{tr(label)}</strong></span><DecimalInput ariaLabel={tr("Native {0}", [label])} value={values.sampling?.[id] ?? null} onChange={n => { const sampling = { ...values.sampling }; if (n === null) delete sampling[id]; else sampling[id] = n; change('sampling', sampling); }}/></label>))}</section></> : tab === 'json' ? <><p className="small muted">{tr("Engine arguments and STRATA environment flags are editable here. Program paths and network access remain managed by the host.")}</p><textarea className="st-input native-json" aria-label={tr("Native configuration JSON")} spellCheck={false} value={text} onChange={e => { setText(e.target.value); setNotice(''); }}/></> : <><p className="small muted">{tr("Add local programs or HTTP MCP servers. Connected tools can read or change the resources you give them access to. Enable tools in chat when you want the model to use them.")}</p><NativeMcpEditor text={mcp} onChange={value => { setMcp(value); setNotice(''); }}/><details><summary className="small">{tr("Configuration example")}</summary><pre className="native-example">{'{\n  "files": {\n    "command": "npx",\n    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/your/folder"],\n    "disabled": false\n  }\n}'}</pre><p className="xs muted">{tr("Saved credentials are masked. Keep the mask to preserve an existing value; type a new value to replace it.")}</p></details></>)}
-  <div className="native-settings-actions"><Btn disabled={pending || !original || !dirty} variant="primary" onClick={() => void save()}>{tr(pending ? 'Saving…' : 'Save settings')}</Btn><Btn disabled={pending} onClick={() => { const saved = JSON.parse(original || '{"values":{},"mcp":{}}'); setValues(saved.values); setText(JSON.stringify(saved.values, null, 2)); setMcp(JSON.stringify(saved.mcp, null, 2)); setError(''); }}>{tr("Restore saved")}</Btn></div>{tr(notice ? <p role="status" className="small">{tr(notice)}</p> : null)}{tr(error ? <ErrorNotice message={error} onRetry={() => setRevision(value => value + 1)}/> : null)}
+  <div className="native-settings-actions"><Btn disabled={pending || !original || !dirty} variant="primary" onClick={() => void save()}>{tr(pending ? 'Saving…' : 'Save settings')}</Btn><Btn disabled={pending} onClick={() => { const saved = JSON.parse(original || '{"values":{},"mcp":{}}'); setValues(saved.values); setText(JSON.stringify(saved.values, null, 2)); setMcp(JSON.stringify(saved.mcp ?? {}, null, 2)); setError(''); }}>{tr("Restore saved")}</Btn></div>{tr(notice ? <p role="status" className="small">{tr(notice)}</p> : null)}{tr(error ? <ErrorNotice message={error} onRetry={() => setRevision(value => value + 1)}/> : null)}
  </details>;
 }
 function NativeFieldInput({ field, value, onChange }: {

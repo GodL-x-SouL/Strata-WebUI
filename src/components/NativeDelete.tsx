@@ -1,7 +1,7 @@
 import { tr } from '../lib/i18n';
 import { useState } from 'react';
 import { Btn, Dialog, ErrorNotice } from './ui';
-import { nativeAction, nativeState, refreshNative, useNative, type NativeJob } from '../lib/native';
+import { removeNativeModel, useNative } from '../lib/native';
 import { catalogVersionLabel, nativeCatalogModels } from '../lib/native-catalog';
 import { sizeGb } from '../lib/format';
 
@@ -22,16 +22,8 @@ export function NativeDeleteDialog({ id, onClose }: { id: string | null; onClose
         setPending(true);
         setError('');
         try {
-            const job = await nativeAction<NativeJob>('operations', { kind: 'remove', args: { model: id } });
-            for (let i = 0; i < 600; i++) {
-                await new Promise(r => setTimeout(r, 500));
-                await refreshNative(true).catch(() => undefined);
-                const current = nativeState()?.jobs.find(j => j.id === job.id);
-                if (current && current.state !== 'running') {
-                    if (current.state === 'error') throw new Error(current.error ?? 'Could not delete this version.');
-                    break;
-                }
-            }
+            if (!id) throw new Error('Choose a downloaded version to delete.');
+            await removeNativeModel(id);
             onClose();
         }
         catch (e) { setError(e instanceof Error ? e.message : String(e)); }

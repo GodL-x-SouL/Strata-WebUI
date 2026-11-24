@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
+import { get } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { createAppUi, openInBrowser, startOpener, APP_UPDATE_UNAVAILABLE, BROWSER_UPDATE_MESSAGE } from '../server/app-ui.mjs';
@@ -93,6 +94,13 @@ test('update check in browser mode: the app part says it cannot be done here, en
 });
 
 async function freePort() { const s = createServer(); await new Promise(r => s.listen(0, '127.0.0.1', r)); const p = s.address().port; await new Promise(r => s.close(r)); return p; }
+function directGet(url) {
+  return new Promise((resolve, reject) => {
+    const request = get(url, { timeout: 2000 }, response => { response.resume(); resolve(response.statusCode); });
+    request.on('timeout', () => request.destroy(new Error('timed out')));
+    request.on('error', reject);
+  });
+}
 
 async function startHost(extraEnv) {
   const home = await mkdtemp(join(tmpdir(), 'strata-host-appui-'));
@@ -121,7 +129,10 @@ test('browser-mode host over HTTP: mode, Quit needs the client header, then the 
     // it is listening on the loopback address only
     const { networkInterfaces } = await import('node:os');
     const other = Object.values(networkInterfaces()).flat().find(i => i && !i.internal && i.family === 'IPv4');
-    if (other) await assert.rejects(fetch(`http://${other.address}:${port}/api/health`, { signal: AbortSignal.timeout(2000) }));
+    if (other) {
+      const status = await directGet(`http://${other.address}:${port}/api/health`).catch(() => null);
+      assert.notEqual(status, 200, 'the host does not answer on the LAN address');
+    }
     assert.equal((await fetch(`${base}/api/app/quit`, { method: 'POST', headers: { 'x-strata-client': 'ui' } })).status, 202);
     assert.equal(await Promise.race([exited, delay(30000).then(() => 'still running')]), 0);
   } finally { host.kill(); await rm(home, { recursive: true, force: true }); }

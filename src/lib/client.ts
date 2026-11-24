@@ -23,6 +23,7 @@ async function request<T>(method: string, path: string, body?: unknown, signal?:
   });
   const text = await res.text();
   const data = text ? (JSON.parse(text) as unknown) : undefined;
+  if (res.status === 401 && path.startsWith('/api/')) window.location.assign('/studio/login');
   if (!res.ok) {
     const message =
       (data as { error?: string } | undefined)?.error ?? `Request failed (${res.status} ${res.statusText})`;

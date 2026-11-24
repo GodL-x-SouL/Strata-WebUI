@@ -73,6 +73,7 @@ test('7 and 8: Model files has no explanatory sentence and holds "Other local mo
   assert.ok(!/Strata prepares all shards/.test(models), 'the sentence is gone');
   assert.ok(!/<p className="small muted">/.test(card), 'the card holds no paragraph');
   assert.match(card, /<div className="model-files__actions"><Btn[\s\S]*?>\{tr\("Storage settings"\)\}<\/Btn><Btn[^>]*onClick=\{onOtherModels\}[^>]*>\{tr\("Other local models\\u2026"\)\}<\/Btn><\/div><\/section>/, 'inside the card, after Storage settings');
+  assert.match(models, /\{tr\(!studio \? <section className="st-card"><h2 className="h4">\{tr\("Model files"\)\}<\/h2>/, 'the host path and local file actions are hidden in Studio');
   assert.ok(!/<\/section><Btn[^>]*other-models/.test(models), 'not a separate control under the card');
 });
 

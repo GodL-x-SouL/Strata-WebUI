@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { localeTag, tr } from '../lib/i18n';
 import { useNative } from '../lib/native';
+import { useStore } from '../lib/store';
 import { changeInstalledEngine, engineGroupTitle, engineMake, engineSize, modelsNeedingNewer, useEngineList, type InstalledEngine } from '../lib/engines';
 import { ApiError } from '../lib/client';
 import { Btn, Dialog, ErrorNotice, Icon } from './ui';
@@ -21,6 +22,7 @@ function unfitWords(engine: InstalledEngine): string {
 
 /** Settings > Engine: the engines installed on this computer. Switch to any of them (the newest too) or delete one. Updating is in About. */
 export function SettingsEngine() {
+  const studio = useStore(s => s.studio);
   const native = useNative();
   const { list, failed, reload } = useEngineList();
   const [use, setUse] = useState<InstalledEngine | null>(null);
@@ -60,7 +62,7 @@ export function SettingsEngine() {
         <small>{facts}</small>
         {engine.fits ? null : <small className="engine-row__why">{unfitWords(engine)}</small>}
       </span>
-      {engine.active ? <span className="engine-row__state">{tr("In use")}</span> : <>
+      {studio ? <span className="engine-row__state">{tr("Managed here")}</span> : engine.active ? <span className="engine-row__state">{tr("In use")}</span> : <>
         {engine.can_use ? <Btn size="sm" disabled={busy} onClick={() => { setError(null); setSaid(''); setUse(engine); }}>{tr("Use this")}</Btn> : null}
         <Btn size="sm" variant="ghost" disabled={busy || !engine.can_delete} title={engine.blocked_code === 'running' ? tr("A running program is using this engine. Unload your models first.") : undefined} onClick={() => { setError(null); setSaid(''); setDel(engine); }}>{tr("Delete")}</Btn>
       </>}
@@ -72,7 +74,7 @@ export function SettingsEngine() {
   return <div className="stack stack--lg native-engine-settings">
     <section className="st-card engine-list">
       <div className="section-toolbar"><h2 className="h3">{tr("Installed engines")}</h2></div>
-      <p className="small muted">{tr("Switch to an older engine to test something, then switch back to the newest. Updating to the latest is in About.")}</p>
+      <p className="small muted">{tr(studio ? "Engine updates run here. Switching or deleting installed engine files is available only on the computer running Strata." : "Switch to an older engine to test something, then switch back to the newest. Updating to the latest is in About.")}</p>
       {list && !list.available ? <p className="small muted">{tr("Engines can be switched and deleted in the installed Strata app.")}</p> : null}
       {failed ? <p className="small inline-error" role="alert">{tr("The installed engines couldn't be read. Try again in a moment.")}</p> : null}
       {list?.available && count === 0 ? <p className="small muted">{tr("No engine is installed on this computer yet. Update in About downloads the right one.")}</p> : null}
@@ -81,7 +83,7 @@ export function SettingsEngine() {
         {group.engines.map(row)}
       </div>)}
       {count > 0 ? <p className="small muted engine-total">{tr("Engines take {0} on this computer.", [engineSize(list?.total_bytes ?? 0, localeTag())])}</p> : null}
-      {count > 0 ? <details className="native-settings-diagnostic engine-details"><summary className="small">{tr("Details")}</summary>{groups.flatMap(g => g.engines).map(e => <p key={`${e.root ?? ''}${e.folder}`} className="small muted">{e.version} · {e.path}{e.build_id ? ` · ${e.build_id}` : ''}</p>)}</details> : null}
+      {!studio && count > 0 ? <details className="native-settings-diagnostic engine-details"><summary className="small">{tr("Details")}</summary>{groups.flatMap(g => g.engines).map(e => <p key={`${e.root ?? ''}${e.folder}`} className="small muted">{e.version} · {e.path}{e.build_id ? ` · ${e.build_id}` : ''}</p>)}</details> : null}
       <div role="status" aria-live="polite">{said ? <p className="small">{said}</p> : null}</div>
       {error ? <ErrorNotice message={error.message} detail={error.detail}/> : null}
     </section>

@@ -146,6 +146,32 @@ export function validateMcpServers(servers,previous={}){
  return out;
 }
 
+const STUDIO_ENV = new Map();
+for(const sw of SPEED_SWITCHES)for(const [name,value] of [
+ ...Object.entries(sw.env),
+ ...Object.entries(sw.legacy??{}),
+ ...(sw.choices??[]).map(([value])=>[Object.keys(sw.env)[0],value]),
+]){
+ if(typeof value!=='string')continue;
+ const allowed=STUDIO_ENV.get(name)??new Set();
+ allowed.add(value);
+ STUDIO_ENV.set(name,allowed);
+}
+export function studioNativeEnv(env){return Object.fromEntries(Object.entries(env??{}).filter(([name,value])=>STUDIO_ENV.get(name)?.has(value)));}
+export function validateStudioNativeSettings(values){
+ const patch=validateNativeSettings(values);
+ if(Object.hasOwn(patch,'args'))throw new Error('Engine arguments are edited only on the computer running Strata.');
+ if(Object.keys(patch).some(name=>name.startsWith('mcp_')))throw new Error('Tool settings are edited only on the computer running Strata.');
+ if(patch.env!==undefined)for(const [name,value] of Object.entries(patch.env)){
+  if(!STUDIO_ENV.get(name)?.has(value))throw new Error('That engine environment setting is not available in Studio.');
+ }
+ return patch;
+}
+export function restoreStudioNativeEnv(env,previous={}){
+ const result=Object.fromEntries(Object.entries(previous).filter(([name,value])=>!STUDIO_ENV.get(name)?.has(value)));
+ for(const [name,value] of Object.entries(env))result[name]=value;
+ return result;
+}
 const sensitive=name=>/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(name);
 export function publicNativeEnv(env){return Object.fromEntries(Object.entries(env).filter(([name])=>ENV_FLAG.test(name)).map(([name,value])=>[name,sensitive(name)?MASK:value]));}
 export function restoreNativeEnv(env,previous={}){const result=Object.fromEntries(Object.entries(previous).filter(([name])=>!ENV_FLAG.test(name)));for(const [name,value] of Object.entries(env)){if(value===MASK){if(previous[name]===undefined)throw new Error(`Enter a new value for ${name}.`);result[name]=previous[name];}else result[name]=value;}return result;}

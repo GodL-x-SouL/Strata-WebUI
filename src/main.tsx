@@ -47,4 +47,5 @@ import './styles/engine-tab.css';
 
 // Loaded last: the shared depth, material and interaction treatment. See the
 // header of the file for the order of the layers and why it sits here.
+import './styles/studio.css';
 import './styles/liquid.css';

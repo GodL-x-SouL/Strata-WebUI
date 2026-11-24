@@ -7,6 +7,7 @@ import { closeSettings, useLocation } from '../lib/router';
 import { bootOnce, bootstrap, getState, setNavOpen, setFocus, useStore, } from '../lib/store';
 import { failedRetriesAfter, hostSeemsStopped } from '../lib/connection-retry';
 import { Sidebar } from './Sidebar';
+import { StudioSidebar } from './StudioSidebar';
 import { CommandPalette } from './CommandPalette';
 import { ShortcutsDialog } from './Shortcuts';
 import { FolderPathDialog } from '../components/FolderPathDialog';
@@ -33,6 +34,7 @@ function AppShell() {
     const location = useLocation();
     const rail = useStore((s) => s.rail);
     const ready = useStore((s) => s.ready);
+    const studio = useStore((s) => s.studio);
     const setup = useStore((s) => s.setup);
     const paletteOpen = useStore((s) => s.paletteOpen);
     const focus = useStore((s) => s.focus);
@@ -42,9 +44,10 @@ function AppShell() {
         bootOnce();
     }, []);
     useEffect(() => {
+        if (studio) return;
         window.addEventListener('keydown', handleAppShortcut);
         return () => window.removeEventListener('keydown', handleAppShortcut);
-    }, []);
+    }, [studio]);
     const compact = useMedia('(max-width: 1279px)');
     const mobile = useMedia('(max-width: 767px)');
     const navOpen = useStore(s => s.navOpen);
@@ -60,26 +63,26 @@ function AppShell() {
     const setupCode = useLoadedModule(loadSetup, setupOpen);
     const setupShown = setupOpen && !!setupCode;
     useSurfaceFocus(setupShown, setupRef);
-    const settingsWanted = location.query.get('settings') === '1';
+    const settingsWanted = !studio && location.query.get('settings') === '1';
     const settingsCode = useLoadedModule(loadSettings, settingsWanted);
     const routeShown = useDeferredValue(location.route);
     return (<div className="app" data-rail={compact ? !navOpen : rail} data-layout={mobile ? 'mobile' : compact ? 'compact' : 'desktop'} data-nav-open={navOpen || undefined} data-focus={focus && location.route === 'chat' || undefined}>
-      <Sidebar containerRef={navRef}/>
+      {studio ? <StudioSidebar containerRef={navRef}/> : <Sidebar containerRef={navRef}/>}
       {tr(navOpen && compact ? <button className="nav-scrim" tabIndex={-1} aria-hidden="true" aria-label={tr("Close navigation")} onClick={() => setNavOpen(false)}/> : null)}
       <main className="main">
         <div className="mobile-bar">
           <IconBtn name="panel" title={tr("Open navigation")} onClick={() => setNavOpen(true)}/>
           <Brand variant="lockup" height={24}/>
           <span className="spacer"/>
-          <IconBtn name="new-chat" title={tr("New chat")} onClick={() => runCommand('new')}/>
+          <IconBtn name={studio ? 'models' : 'new-chat'} title={tr(studio ? 'Models' : 'New chat')} onClick={() => studio ? runCommand('models') : runCommand('new')}/>
         </div>
         <ConnectionBar />
         {tr(focus && location.route === 'chat' ? <FocusBar /> : null)}
-        {tr(!ready ? <BootSkeleton /> : <Suspense fallback={<BootSkeleton />}><RouteView route={routeShown}/></Suspense>)}
+        {tr(!ready ? <BootSkeleton /> : <Suspense fallback={<BootSkeleton />}><RouteView route={routeShown} studio={studio}/></Suspense>)}
       </main>
-      <CommandPalette open={paletteOpen}/>
+      <CommandPalette open={paletteOpen && !studio}/>
       <Dialog open={settingsWanted && !!settingsCode} title={tr("Settings")} className="settings-dialog" onClose={closeSettings}>{settingsCode ? <settingsCode.SettingsScreen /> : null}</Dialog>
-      <ShortcutsDialog />
+      {!studio && <ShortcutsDialog />}
       <FolderPathDialog />
       {tr(setupShown ? (<div className="setupmodal" role="dialog" aria-modal="true" aria-label={tr("Set up Strata")}>
           <div className="scrim" data-open="true" aria-hidden="true"/>
@@ -171,9 +174,11 @@ function FocusBar() {
       <IconBtn name="x" title={tr("Leave focus mode")} onClick={() => setFocus(false)}/>
     </div>);
 }
-function RouteView({ route }: {
+function RouteView({ route, studio }: {
     route: string;
+    studio: boolean;
 }) {
+    if (studio && route === 'chat') return <ModelRunScreen />;
     switch (route) {
         case 'chat':
             return <ChatScreen />;
@@ -185,11 +190,11 @@ function RouteView({ route }: {
         case 'monitor':
             return <MonitorScreen />;
         case 'tasks':
-            return <TasksScreen />;
+            return studio ? <ModelRunScreen /> : <TasksScreen />;
         case 'skills':
-            return <SkillsScreen />;
+            return studio ? <ModelRunScreen /> : <SkillsScreen />;
         default:
-            return <ChatScreen />;
+            return studio ? <ModelRunScreen /> : <ChatScreen />;
     }
 }
 function BootSkeleton() {

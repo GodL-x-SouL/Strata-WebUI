@@ -23,8 +23,12 @@ test('the Windows and macOS app tells the host it shows the page in the app wind
   assert.match(start, /cmd\.env\("STRATA_UI_MODE", "window"\)/, 'start_host sets the mode the page reads at /api/app/mode');
 });
 
-test('the Linux shell still sets the mode it starts in', () => {
-  assert.match(read('../../desktop/src-tauri/src/supervisor.rs'), /cmd\.env\("STRATA_UI_MODE", mode\)/);
+test('the Linux shell still sets the mode it starts in and enables the Studio gateway only on request', () => {
+  const shell = read('../../desktop/src-tauri/src/supervisor.rs');
+  assert.match(shell, /cmd\.env\("STRATA_UI_MODE", if opts\.browser \{ "browser" \} else \{ "window" \}\)/);
+  assert.match(shell, /if opts\.studio \{ cmd\.env\("STRATA_STUDIO", "1"\); \}/);
+  assert.match(shell, /"--studio" => \{ o\.studio = true; o\.browser = true; \}/);
+  assert.match(shell, /if studio && s\.mode != "studio"/);
 });
 
 test('in window mode the page sends links to the host; with no mode it has nothing to hand them to', () => {

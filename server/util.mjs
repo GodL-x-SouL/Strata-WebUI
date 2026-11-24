@@ -113,8 +113,10 @@ const REPLACEABLE = new Set(['monitor']);
 /** Minimal SSE hub. */
 export class EventHub {
   #clients = new Set();
+  #filters = new WeakMap();
+  #transforms = new WeakMap();
 
-  add(res) {
+  add(res, events = null, transform = null) {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache, no-transform',
@@ -123,6 +125,8 @@ export class EventHub {
     });
     res.write(': connected\n\n');
     this.#clients.add(res);
+    if (events) this.#filters.set(res, new Set(events));
+    if (transform) this.#transforms.set(res, transform);
     const ping = setInterval(() => { if (!res.writableNeedDrain) res.write(': ping\n\n'); }, 15000);
     res.on('close', () => {
       clearInterval(ping);
@@ -131,11 +135,14 @@ export class EventHub {
   }
 
   send(event, payload) {
-    const frame = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
     for (const res of this.#clients) {
       try {
+        const filter = this.#filters.get(res);
+        if (filter && !filter.has(event)) continue;
         if (res.writableNeedDrain && REPLACEABLE.has(event)) continue;
         if (res.writableLength > EVENT_BACKLOG_MAX) { this.#clients.delete(res); res.destroy(); continue; }
+        const transform = this.#transforms.get(res);
+        const frame = `event: ${event}\ndata: ${JSON.stringify(transform ? transform(event, payload) : payload)}\n\n`;
         res.write(frame);
       } catch {
         this.#clients.delete(res);

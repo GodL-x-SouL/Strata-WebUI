@@ -84,7 +84,7 @@ function gpuLine(info: FirstRunInfo) {
  * The first-run card: the engine this PC needs, one button to download it, progress, and the offline way (choose a downloaded file).
  * Nothing is downloaded before a button is pressed.
  */
-export function EngineFirstRun({ onDone }: { onDone: () => void }) {
+export function EngineFirstRun({ onDone, studio = false }: { onDone: () => void; studio?: boolean }) {
     const [info, setInfo] = useState<FirstRunInfo | null>(null);
     const [job, setJob] = useState<NativeJob | null>(null);
     const [busy, setBusy] = useState(false), [problem, setProblem] = useState('');
@@ -170,7 +170,7 @@ export function EngineFirstRun({ onDone }: { onDone: () => void }) {
     const eta = useDownloadEta(running && bytes ? { done_gb: bytes * percent / 100 / 1e9, remaining_gb: bytes * (100 - percent) / 100 / 1e9 } : undefined, job?.id);
     const cards = (info?.gpus ?? []).filter(g => (g.vramGb ?? 0) >= 1).length;
     const hidden = <input ref={file} type="file" accept=".gz,.tgz,.xz,.zip" hidden onChange={e => void chosen(e.target.files)}/>;
-    const pick = (label: string) => <button type="button" className="onboard-continue-anyway" disabled={busy || running} onClick={() => file.current?.click()}>{tr(label)}</button>;
+    const pick = (label: string) => studio ? null : <button type="button" className="onboard-continue-anyway" disabled={busy || running} onClick={() => file.current?.click()}>{tr(label)}</button>;
 
     let body;
     if (finished) {
@@ -198,12 +198,12 @@ export function EngineFirstRun({ onDone }: { onDone: () => void }) {
             actions = <><Btn variant="primary" disabled={busy} onClick={() => void start()}>{tr(failed ? 'Continue' : 'Download the engine')}</Btn>{pick("I already have the file…")}</>;
         }
         else if (info.status === 'offline') {
-            main = <>{found}<p>{tr("Strata could not reach github.com. Check your connection and try again, or download the engine file on another PC and choose it here.")}</p></>;
+            main = <>{found}<p>{tr(studio ? "Strata could not reach github.com. Check the computer’s connection and try again." : "Strata could not reach github.com. Check your connection and try again, or download the engine file on another PC and choose it here.")}</p></>;
             actions = <><Btn variant="primary" disabled={busy} onClick={look}>{tr("Try again")}</Btn>{pick("Choose a downloaded file…")}{withoutEngine}</>;
         }
         else if (info.status === 'error') {
             // The list could not be read (not "no internet", which has its own card above): a first run is not an update, so no word of updates or Settings; the raw reason stays behind Details.
-            main = <>{found}<p>{tr("Strata couldn’t read its download list, so it can’t pick an engine yet. Press Try again, or choose another way below.")}</p>{info.details ? <details className="error-detail"><summary className="small">{tr('Details')}</summary><pre className="small muted">{info.details}</pre></details> : null}</>;
+            main = <>{found}<p>{tr(studio ? "Strata couldn’t read its download list, so it can’t pick an engine yet. Press Try again." : "Strata couldn’t read its download list, so it can’t pick an engine yet. Press Try again, or choose another way below.")}</p>{info.details ? <details className="error-detail"><summary className="small">{tr('Details')}</summary><pre className="small muted">{info.details}</pre></details> : null}</>;
             actions = <><Btn variant="primary" disabled={busy} onClick={look}>{tr("Try again")}</Btn>{pick("Choose a downloaded file…")}{withoutEngine}</>;
         }
         else if (info.status === 'wrong-make') {
@@ -219,7 +219,7 @@ export function EngineFirstRun({ onDone }: { onDone: () => void }) {
                 {job?.details ? <details className="error-detail"><summary className="small">{tr('Details')}</summary><pre className="small muted">{job.details}</pre></details> : null}
                 <p className="small muted">{percent >= 100 ? tr("The file was downloaded. Continue tries the install again.") : tr("The download stopped. Continue picks it up where it stopped.")}</p></div> : null}
             {problem ? <div className="onboard-error" style={{ maxWidth: 560, margin: '0 auto' }}><p role="alert" className="small inline-error">{problem}</p></div> : null}
-            <footer className="onboard-footer onboard-footer--welcome">{actions}<button type="button" className="onboard-continue-anyway" disabled={busy || running} onClick={() => void connectOnlyClick()}>{tr("Only connect to Strata on another computer")}</button><small>{tr("Nothing is downloaded. You can add the engine later from the Models page.")}</small></footer></>;
+            <footer className="onboard-footer onboard-footer--welcome">{actions}{tr(!studio ? <button type="button" className="onboard-continue-anyway" disabled={busy || running} onClick={() => void connectOnlyClick()}>{tr("Only connect to Strata on another computer")}</button> : null)}<small>{tr("Nothing is downloaded. You can add the engine later from the Models page.")}</small></footer></>;
     }
-    return <div className="setup guided-onboarding" data-step="engine">{hidden}<header className="onboard-header"><Brand variant="lockup" height={22}/><FirstRunLanguage/></header>{body}</div>;
+    return <div className="setup guided-onboarding" data-step="engine">{studio ? null : hidden}<header className="onboard-header"><Brand variant="lockup" height={22}/><FirstRunLanguage/></header>{body}</div>;
 }

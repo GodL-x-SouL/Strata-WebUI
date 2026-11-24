@@ -57,6 +57,39 @@ test('the Expert settings row uses the choice helpers', async () => {
   assert.match(source, /withChoice\(sw, values\.env, v\)/);
 });
 
+test('a Studio save changes a known speed choice without touching local programs, arguments or private environment', async t => {
+  const f = nativeFixture();
+  t.after(() => f.cleanup());
+  await f.control.refresh();
+  const model = 'iq2_xs', file = join(f.repo, `strata-${model}.json`);
+  const config = JSON.parse(readFileSync(file, 'utf8'));
+  config.backend = 'cuda';
+  config.args = ['--max-context', '32768'];
+  config.mcp_servers = { files: { command: 'node', args: ['server.mjs'], cwd: '/local/tools', env: { API_KEY: 'private' } } };
+  config.env = { ...config.env, STRATA_ROUTE_TAIL_SKIP: '5' };
+  (await import('node:fs')).writeFileSync(file, JSON.stringify(config));
+  const before = f.control.settings(model, { studio: true });
+  assert.equal(before.mcp, undefined);
+  assert.equal(before.values.args, undefined);
+  assert.equal(before.values.mcp_timeout_s, undefined);
+  assert.equal(before.values.mcp_max_rounds, undefined);
+  assert.equal(before.values.mcp_max_result_chars, undefined);
+  assert.deepEqual(before.values.env, { STRATA_ROUTE_TAIL_SKIP: '5' });
+  const row = before.speedSwitches.find(r => r.id === 'route_tail_skip');
+  const env = withChoice(row, before.values.env, '7');
+  f.control.save(model, { values: { ...before.values, env } }, { studio: true });
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(saved.env.STRATA_ROUTE_TAIL_SKIP, '7');
+  assert.equal(saved.env.PATH, '/native/bin');
+  assert.equal(saved.env.STRATA_TOKEN, 'private');
+  assert.deepEqual(saved.args, config.args);
+  assert.deepEqual(saved.mcp_servers, config.mcp_servers);
+  assert.deepEqual(saved.unknown_native_key, { preserve: true });
+  assert.throws(() => f.control.save(model, { values: { args: [] } }, { studio: true }), /Engine arguments/);
+  assert.throws(() => f.control.save(model, { values: {}, mcp: {} }, { studio: true }), /Tool settings/);
+  assert.throws(() => f.control.save(model, { values: { env: { STRATA_TOKEN: 'changed' } } }, { studio: true }), /not available in Studio/);
+});
+
 test('a model\'s settings carry the choice, and saving a rank writes it into the model\'s settings file (fixture host, RTX 4090, CUDA)', async t => {
   const f = nativeFixture();
   t.after(() => f.cleanup());

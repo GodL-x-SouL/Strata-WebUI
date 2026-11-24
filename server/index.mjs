@@ -71,7 +71,9 @@ import { createUserRules, rulesFile } from './user-rules.mjs';
 import { createLlmProxy, samplingFromExpert } from './agent/llm-shape.mjs';
 import { checkUpdates, checkComponentUpdates, engineFirstRun } from './updates.mjs';
 import { plainNoModel } from './no-model-text.mjs';
-import { createAppUi } from './app-ui.mjs';
+import { createAppUi, openInBrowser } from './app-ui.mjs';
+import { createStudioGateway } from './studio-gateway.mjs';
+import { studioEvent, studioSetupStepInput } from './studio-data.mjs';
 import { appVersionFrom, appVersionToShow } from './app-version.mjs';
 import { createImageModels } from './image-models.mjs';
 import { createRuntimeModels } from './runtime-models.mjs';
@@ -108,6 +110,7 @@ const DIST = process.env.STRATA_DIST
     : join(ROOT, 'dist');
 const PORT = Number(process.env.STRATA_PORT ?? 8791);
 const HOST = process.env.STRATA_BIND ?? '127.0.0.1';
+const STUDIO = process.env.STRATA_STUDIO === '1' || argv.includes('--studio');
 /* The folder chats work in when nothing else is chosen. It is never the app's own folder (the host is started inside its install
    directory, so `process.cwd()` was "host" in the sidebar and the agent could read and write the app): the person's own
    Documents\Strata\Workspace (the models folder is next to it, not in it), created on first use, unless STRATA_WORKSPACE names one. */
@@ -145,7 +148,7 @@ const control = createControl({ control: CONTROL, log: line => console.log(line)
 // Files a run as administrator made in Strata's own folders (owner Administrators) are given back to the user at every start; best effort, never blocks.
 if (control && process.platform === 'win32' && !process.env.STRATA_NO_REPAIR_ACCESS) void control.repairAccess().catch(() => {});
 /* Which window shows the page (the app window or, when that cannot run, a browser tab) and what only the app window can do: app-ui.mjs. */
-const appUi = createAppUi({ shutdown: () => shutdown() });
+const appUi = createAppUi({ shutdown: () => shutdown(), openPage: url => STUDIO && studio ? studio.open(url) : openInBrowser(url) });
 /* The app's version has one source: the desktop shell passes it (STRATA_APP_VERSION, from app/desktop/src-tauri/Cargo.toml). Outside the app it is read from the same file in a checkout, else 'dev'. */
 function appVersion() { return appVersionFrom({ env: process.env, here: HERE }); }
 const appUpdater = appUi.updater;
@@ -1002,6 +1005,17 @@ const tunnelOrigin = createLocalShare({ handle: (req, res, path, method) => open
 const connector = createConnectorInstaller({ directory: join(store.HOME, 'engine', 'cloudflare'), componentDirectory: join(componentsDirectory(), 'cloudflared') });
 const cloudflare = createCloudflare({ origin: tunnelOrigin, originUrl: `http://127.0.0.1:${tunnelPort}`, hasKey: () => !!store.get().serving?.apiKey, changed: serving.setTunnel, locate: connector.locate, prepareConnector: connector.ensure, connectorInfo: connector.connector, findRunning: findRunningConnector });
 await cloudflare.inspect();
+let studio = null, studioCloudflare = null;
+if (STUDIO) {
+  const studioPort = await findFreePort(Number(process.env.STRATA_STUDIO_PORT ?? PORT + 3), '127.0.0.1', { skip: [PORT, sharePort, tunnelPort] });
+  studio = createStudioGateway({ originPort: PORT, port: studioPort, open: openInBrowser, tunnel: () => studioCloudflare });
+  // The gateway outlives its tunnel; stopping cloudflared must not close the Studio response that requested it.
+  const studioTunnelOrigin = { start: async () => {}, stop: async () => {} };
+  studioCloudflare = createCloudflare({ origin: studioTunnelOrigin, originUrl: studio.url(), hasKey: () => true, urlSuffix: '', warning: null, locate: connector.locate, prepareConnector: connector.ensure, connectorInfo: connector.connector, findRunning: findRunningConnector });
+  await studio.start();
+  await studioCloudflare.inspect();
+  console.log(`[strata] Studio: ${studio.url()}`);
+}
 
 /* --------------------------------------------------------------- routing --- */
 
@@ -1109,9 +1123,11 @@ async function api(req, res, path, method, url) {
   }
   if (storageChanging && !['GET', 'OPTIONS'].includes(method)) return error(res, 409, 'Wait for the model folder check to finish.');
   // --- events -------------------------------------------------------------
-  if (path === '/api/events') return hub.add(res);
+  // Studio JSON is projected once at the gateway; SSE is projected here because the gateway streams it unchanged.
+  if (path === '/api/events') return hub.add(res, url.searchParams.get('surface') === 'studio' ? ['monitor', 'models', 'native', 'serving', 'setup'] : null,
+    url.searchParams.get('surface') === 'studio' ? (event, payload) => studioEvent(event, payload) : null);
   if(path.startsWith('/api/native')){try{
-  if(path==='/api/native'&&method==='GET')return json(res,200,await native.refresh(url.searchParams.get('refresh')==='1'));
+  if(path==='/api/native'&&method==='GET'){const value=await native.refresh(url.searchParams.get('refresh')==='1');return json(res,200,value);}
   if(path==='/api/native'&&method==='PATCH')return json(res,200,await native.configure(await readBody(req)));
   if(path==='/api/native/ram-reserve'&&method==='GET')return json(res,200,native.ramReserve());
   if(path==='/api/native/ram-reserve'&&method==='POST')return json(res,200,native.saveRamReserve((await readBody(req))?.gib));
@@ -1132,7 +1148,7 @@ async function api(req, res, path, method, url) {
   if(path==='/api/native/models-folder/resume'&&method==='POST'){const body=await readBody(req);return json(res,202,await native.finishInterruptedMove({stopRunning:body.stopRunning===true}));}
   if(path==='/api/native/models-folder/leave'&&method==='POST')return json(res,200,await native.leaveInterruptedMove());
   if(path==='/api/native/plan'&&method==='POST')return json(res,200,await native.plan(await readBody(req)));
-  if(path==='/api/native/operations'&&method==='POST'){if(storageChanging)return error(res,409,'Wait for the model folder check to finish.');const body=await readBody(req);return json(res,202,native.operation(body.kind,body.args));}
+  if(path==='/api/native/operations'&&method==='POST'){if(storageChanging)return error(res,409,'Wait for the model folder check to finish.');const body=await readBody(req);return json(res,202,native.operation(body.kind,body.args,{studio:url.searchParams.get('surface')==='studio'}));}
   if(path==='/api/native/engine-restart/dismiss'&&method==='POST')return json(res,200,native.dismissRestart());
   if(path==='/api/native/logs'&&method==='GET')return json(res,200,{logs:native.logs()});
   if(path==='/api/native/logs/save'&&method==='POST'){
@@ -1156,21 +1172,22 @@ async function api(req, res, path, method, url) {
    return json(res,200,{path:picked.path,preview:await native.localPreview(picked.path)});}
   if(path==='/api/native/benchmark'&&method==='GET')return json(res,200,native.benchmarkReport());
   /* The auto-tuner's saved tunings (Strata Control's presets, shared with the Terminal). Starting a tune or a re-check is POST /api/native/operations with kind autotune / recheck. */
-  if(path==='/api/native/tune/status'&&method==='GET')return json(res,200,await native.tuneStatus({model:url.searchParams.get('model'),resourceProfile:url.searchParams.get('resourceProfile')||undefined,vision:url.searchParams.get('vision')||undefined}));
-  if(path==='/api/native/tune/effective'&&method==='GET')return json(res,200,await native.tuneEffective({model:url.searchParams.get('model'),resourceProfile:url.searchParams.get('resourceProfile')||undefined,vision:url.searchParams.get('vision')||undefined}));
-  if(path==='/api/native/tune/off'&&method==='POST'){const body=await readBody(req);return json(res,200,await native.tuneOff({model:body.model,resourceProfile:body.resourceProfile,vision:body.vision}));}
-  if(path==='/api/native/tune/presets'&&method==='GET')return json(res,200,await native.tunePresets.list());
-  if(path==='/api/native/tune/undo'&&method==='POST'){const body=await readBody(req);return json(res,200,await native.tunePresets.undoFor({model:body.model,resourceProfile:body.resourceProfile,vision:body.vision}));}
+  const studio=url.searchParams.get('surface')==='studio';
+  if(path==='/api/native/tune/status'&&method==='GET'){const value=await native.tuneStatus({model:url.searchParams.get('model'),resourceProfile:url.searchParams.get('resourceProfile')||undefined,vision:url.searchParams.get('vision')||undefined});return json(res,200,value);}
+  if(path==='/api/native/tune/effective'&&method==='GET'){const value=await native.tuneEffective({model:url.searchParams.get('model'),resourceProfile:url.searchParams.get('resourceProfile')||undefined,vision:url.searchParams.get('vision')||undefined});return json(res,200,value);}
+  if(path==='/api/native/tune/off'&&method==='POST'){const body=await readBody(req);const value=await native.tuneOff({model:body.model,resourceProfile:body.resourceProfile,vision:body.vision});return json(res,200,value);}
+  if(path==='/api/native/tune/presets'&&method==='GET'){const value=await native.tunePresets.list();return json(res,200,value);}
+  if(path==='/api/native/tune/undo'&&method==='POST'){const body=await readBody(req);const value=await native.tunePresets.undoFor({model:body.model,resourceProfile:body.resourceProfile,vision:body.vision});return json(res,200,value);}
   const tunePreset=/^\/api\/native\/tune\/presets\/([0-9a-f]{8,32})\/(apply|rename|delete|undo)$/.exec(path);
-  if(tunePreset&&method==='POST')return json(res,200,await native.tunePresets.action(tunePreset[2],tunePreset[1],await readBody(req)));
+  if(tunePreset&&method==='POST'){const value=await native.tunePresets.action(tunePreset[2],tunePreset[1],await readBody(req));return json(res,200,value);}
   const nativeOperation=/^\/api\/native\/operations\/([a-z0-9-]+)\/cancel$/.exec(path);
-  if(nativeOperation&&method==='POST')return json(res,200,await native.cancel(nativeOperation[1]));
+  if(nativeOperation&&method==='POST')return json(res,200,await native.cancel(nativeOperation[1],{studio}));
   const nativeInstance=/^\/api\/native\/instances\/([a-z0-9-]+)\/(unload|default)$/.exec(path);
   if(nativeInstance&&method==='POST')return json(res,200,nativeInstance[2]==='unload'?await native.unload(nativeInstance[1]):native.setDefault(nativeInstance[1]));
   const nativeSettings=/^\/api\/native\/models\/([a-z0-9_.-]+)\/settings$/.exec(path);
   /* Expert mode shows what will actually run: the saved tuning's values come with the settings (null when none applies or unreadable). */
-  if(nativeSettings&&method==='GET'){const settings=native.settings(nativeSettings[1]);let tuned=null;try{const t=await native.tuneEffective({model:nativeSettings[1],resourceProfile:url.searchParams.get('resourceProfile')||undefined,vision:url.searchParams.get('vision')||undefined});tuned=t.applied?t:null;}catch{tuned=null;}return json(res,200,{...settings,tuned,hints:await native.settingsHints?.(nativeSettings[1])});}
-  if(nativeSettings&&method==='PATCH')return json(res,200,native.save(nativeSettings[1],await readBody(req)));
+  if(nativeSettings&&method==='GET'){const settings=native.settings(nativeSettings[1],{studio});let tuned=null;try{const t=await native.tuneEffective({model:nativeSettings[1],resourceProfile:url.searchParams.get('resourceProfile')||undefined,vision:url.searchParams.get('vision')||undefined});tuned=t.applied?t:null;}catch{tuned=null;}return json(res,200,{...settings,tuned,hints:await native.settingsHints?.(nativeSettings[1])});}
+  if(nativeSettings&&method==='PATCH')return json(res,200,native.save(nativeSettings[1],await readBody(req),{studio:url.searchParams.get('surface')==='studio'}));
   const nativeSettingsFile=/^\/api\/native\/models\/([a-z0-9_.-]+)\/settings-file$/.exec(path);
   if(nativeSettingsFile&&method==='GET')return json(res,200,native.settingsFile(nativeSettingsFile[1]));
   if(nativeSettingsFile&&method==='POST')return json(res,200,await native.openSettingsFile(nativeSettingsFile[1]));
@@ -1424,7 +1441,7 @@ async function api(req, res, path, method, url) {
       ? engine.shapes.map(s => ({ shape: s.shape, component: s.component, usable: s.usable === true, version: s.engine?.version ?? null, backend: s.engine?.backend ?? null }))
       : [];
     const anyUsableEngine = Boolean(engine?.usable) || shapeEngines.some(s => s.usable);
-    return json(res, 200, {
+    const status = {
       packaged: process.env.STRATA_PACKAGED === '1',
       control: control ? { dir: control.control.dir, python: control.control.python, version: control.version, bundle: control.control.bundle } : null,   // control.control: the Control in use now (a first-run update can switch it)
       engine,
@@ -1433,7 +1450,8 @@ async function api(req, res, path, method, url) {
       engineSetup: !bundledEngineSettled,
       componentsDir: componentsDirectory(),
       acquisition: { forbidden: acquisitionForbidden(), env: process.env.STRATA_NO_ACQUIRE ?? null },
-    });
+    };
+    return json(res, 200, status);
   }
   // The shell (and nothing else) holds the secret that lets it end the host or tell it which window is in use.
   const fromShell = () => {
@@ -1441,6 +1459,7 @@ async function api(req, res, path, method, url) {
     return token.length >= 32 && sameSecret(req.headers['x-strata-shutdown'], token);
   };
   // Which window the person is using: the page shows "Quit Strata" in browser mode only.
+  const pageUrl = () => studio ? studio.url() : `http://127.0.0.1:${PORT}/`;
   if (path === '/api/app/mode' && method === 'GET') return json(res, 200, appUi.state());
   if (path === '/api/app/quit' && method === 'POST') {
     // A web page cannot send this header without the browser asking the host first, and the host refuses pages that are not local (above).
@@ -1454,8 +1473,8 @@ async function api(req, res, path, method, url) {
     const body = await readBody(req);
     try {
       if (body.bridge) appUi.setBridge(body.bridge);
-      if (body.mode === 'browser') return json(res, 200, await appUi.switchToBrowser({ url: `http://127.0.0.1:${PORT}/`, reason: body.reason, notice: typeof body.notice === 'string' ? body.notice.slice(0, 300) : '', openPage: body.open !== false }));
-      if (body.open === true) return json(res, 200, { ...appUi.state(), opened: await appUi.openPage(`http://127.0.0.1:${PORT}/`) });
+      if (body.mode === 'browser') return json(res, 200, { ...await appUi.switchToBrowser({ url: pageUrl(), reason: body.reason, notice: typeof body.notice === 'string' ? body.notice.slice(0, 300) : '', openPage: body.open !== false }), url: pageUrl() });
+      if (body.open === true) return json(res, 200, { ...appUi.state(), opened: await appUi.openPage(pageUrl()), url: pageUrl() });
       return json(res, 200, appUi.state());
     } catch (err) { return error(res, 400, err.message); }
   }
@@ -1497,8 +1516,9 @@ async function api(req, res, path, method, url) {
   }
   if (path === '/api/engine/job' && method === 'GET') {
     // The newest engine download / file install, read without waiting for the native snapshot to connect (the first-run card needs it before that).
-    const kinds = ['update-engine', 'install-engine-file'];
-    return json(res, 200, { job: native.state().jobs.filter(j => kinds.includes(j.kind)).slice(-1)[0] ?? null });
+    const studio = url.searchParams.get('surface') === 'studio';
+    const job = native.state().jobs.filter(j => j.kind === 'update-engine' || !studio && j.kind === 'install-engine-file').filter(j => !studio || j.surface === 'studio').slice(-1)[0] ?? null;
+    return json(res, 200, { job });
   }
   if (path === '/api/engine/from-file' && method === 'POST') {
     // The person chose an engine package in the page (the offline path). The bytes come here; Control checks and installs them.
@@ -1514,7 +1534,10 @@ async function api(req, res, path, method, url) {
   if (path === '/api/updates/check' && method === 'GET') return json(res, 200, await checkUpdates({ appVersion:appVersionToShow(setupState().app.version,native.state().version), engineVersion:native.state().available?(native.state().installed?.engine?.version??null):(await engine.config()).engine.version }));
 
   if (path === '/api/setup/step' && method === 'POST') {
-    const body = await readBody(req);
+    const studioWrite = url.searchParams.get('surface') === 'studio';
+    let body;
+    try { body = studioWrite ? studioSetupStepInput(await readBody(req)) : await readBody(req); }
+    catch (e) { return error(res, 400, e.message); }
     const s = store.get();
     const step = Math.max(1, Math.min(4, migrateSetup({ step: body.step, flowVersion: body.flowVersion }).step));
     store.update({
@@ -1699,8 +1722,12 @@ async function api(req, res, path, method, url) {
   if (path === '/api/engine/export' && method === 'GET') return json(res, 200, await engine.exportConfig());
 
   // --- serving ------------------------------------------------------------
-  if (path === '/api/serving/tunnel' && method === 'GET') return json(res, 200, await cloudflare.inspect());
+  if (path === '/api/serving/tunnel' && method === 'GET') {
+    if (url.searchParams.get('surface') === 'studio') return error(res, 403, 'The inference tunnel is managed only on the computer running Strata.');
+    return json(res, 200, await cloudflare.inspect());
+  }
   if (path === '/api/serving/tunnel' && method === 'POST') {
+    if (url.searchParams.get('surface') === 'studio') return error(res, 403, 'The inference tunnel is managed only on the computer running Strata.');
     try { const body = await readBody(req); if (body.action === 'stop') await cloudflare.stop(); else if (body.action === 'start') await cloudflare.start(body); else if (body.action === 'prepare') await cloudflare.prepare(); else throw new Error('Unknown tunnel action.'); return json(res, 200, serving.state()); }
     catch(e) { return error(res, 400, e.message); }
   }
@@ -1712,10 +1739,18 @@ async function api(req, res, path, method, url) {
     try { const body = await readBody(req); if (body.enabled === true) await localShare.start(); else await localShare.stop(); return json(res, 200, serving.state()); }
     catch(e) { return error(res, 400, e.message); }
   }
-  if (path === '/api/serving' && method === 'GET') return json(res, 200, serving.state());
+  if (path === '/api/serving' && method === 'GET') {
+    const value = serving.state();
+    return json(res, 200, value);
+  }
   if (path === '/api/serving' && method === 'PATCH') {
     const body = await readBody(req);
-    return json(res, 200, serving.patch(body));
+    if(url.searchParams.get('surface')==='studio'){
+      const allowed=new Set(['pauseServing']);
+      if(Object.keys(body??{}).some(key=>!allowed.has(key)))return error(res,403,'That serving setting is not available in Studio.');
+    }
+    const value = serving.patch(body);
+    return json(res, 200, value);
   }
   const cancelMatch = /^\/api\/serving\/requests\/([^/]+)\/cancel$/.exec(path);
   if (cancelMatch && method === 'POST') return json(res, 200, serving.cancel(cancelMatch[1]));
@@ -2212,6 +2247,7 @@ async function api(req, res, path, method, url) {
   if (path === '/api/shell' && method === 'GET') return json(res, 200, shellState());
   if (path === '/api/shell/prefs' && method === 'POST') {
     const b = await readBody(req);
+    if(url.searchParams.get('surface')==='studio'&&Object.keys(b??{}).some(key=>key!=='language'))return error(res,403,'Desktop shell settings are changed only on the computer running Strata.');
     try { writeShellPrefs(b); } catch (e) { return error(res, 400, e.message); }
     return json(res, 200, shellState());
   }
@@ -2579,7 +2615,7 @@ const shutdown = async () => {
   // #6661: drain any in-flight or queued chat saves to disk before tearing down sockets and exiting.
   await drainChatStore(chatStore, { inFlight: inFlightChatSaves, timeoutMs: CHAT_DRAIN_MS });
   server.closeAllConnections?.();
-  await Promise.allSettled([localShare.stop(),cloudflare.stop(),native.close(),agent.close()]);
+  await Promise.allSettled([localShare.stop(),cloudflare.stop(),studioCloudflare?.stop(),studio?.stop(),native.close(),agent.close()]);
   await drainChatStore(chatStore, { timeoutMs: 1000 });
   process.exit(0);
 };

@@ -1,8 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync,readdirSync,mkdirSync,writeFileSync} from 'node:fs';
-import {join} from 'node:path';
+import {readFileSync,readdirSync,mkdirSync,writeFileSync,mkdtempSync,rmSync} from 'node:fs';
+import {join,resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {tmpdir} from 'node:os';
+import {createNativeControl} from '../server/native-control.mjs';
 import {nativeFixture,finishJob} from './helpers/native-fixture.mjs';
+test('source hosts default to the checkout root instead of a nested Strata folder',async()=>{
+ const directory=mkdtempSync(join(tmpdir(),'strata-source-repo-'));
+ try{
+  const control=createNativeControl({directory});
+  assert.equal(control.state().repo,resolve(fileURLToPath(new URL('../../../',import.meta.url))));
+ }finally{rmSync(directory,{recursive:true,force:true});}
+});
 test('native instances isolate devices, ports, IDs and private keys; default loading switches one model',async()=>{
  const f=nativeFixture();try{
   await f.control.refresh(true);const load=async args=>{const job=f.control.operation('load',args);const done=await finishJob(f.control,job.id);assert.equal(done.state,'done',done.error);return f.control.resolveInstance(done.result.instanceId);};
@@ -35,6 +45,15 @@ test('native update refuses local edits; calibration targets the chosen installe
 test('cancelling a native load before dispatch preserves the running instance',async()=>{const f=nativeFixture();try{await f.control.refresh();const first=await finishJob(f.control,f.control.operation('load',{model:'iq2_xs',gpus:[0]}).id);const job=f.control.operation('load',{model:'iq3_s',gpus:[1]});await f.control.cancel(job.id);await new Promise(r=>setTimeout(r,20));assert.equal(f.control.state().instances.length,1);assert.equal(f.control.state().instances[0].id,first.result.instanceId);assert.equal(f.control.state().jobs.find(j=>j.id===job.id).state,'cancelled');}finally{await f.cleanup();}});
 
 test('retuning or repairing an installed native model reuses its original data folder',async()=>{const f=nativeFixture();try{await f.control.refresh();await f.control.plan({family:'qwen',model:'IQ2_XS',context:131072});const call=f.rpcCalls.find(c=>c.name==='strata_install');assert.equal(call.arguments.data_dir,f.installed.data_folder);assert.equal(call.arguments.confirm,false);}finally{await f.cleanup();}});
+
+test('Studio operations carry their origin and cannot start or cancel host-only work',async()=>{const f=nativeFixture();try{
+ await f.control.refresh();
+ for(const kind of ['calibrate','update-strata','rollback','install-engine-file','restart-models'])assert.throws(()=>f.control.operation(kind,{}, {studio:true}),/only on the computer/);
+ const failed=f.control.operation('load',{model:'iq2_xs',gpus:[99]},{studio:true});const failedDone=await finishJob(f.control,failed.id);assert.equal(failedDone.state,'error');assert.equal(f.control.state().jobs.find(j=>j.id===failed.id).surface,'studio');
+ const local=f.control.operation('load',{model:'iq2_xs',gpus:[0]});await assert.rejects(f.control.cancel(local.id,{studio:true}),/only on the computer/);await f.control.cancel(local.id);assert.equal(f.control.state().jobs.find(j=>j.id===local.id).state,'cancelled');
+ const remote=f.control.operation('load',{model:'iq2_xs',gpus:[0]},{studio:true});await f.control.cancel(remote.id,{studio:true});assert.equal(f.control.state().jobs.find(j=>j.id===remote.id).state,'cancelled');
+ f.setProgramWait(true);const update=f.control.operation('update-engine',{}, {studio:true});await new Promise(r=>setTimeout(r,20));await assert.rejects(f.control.cancel(update.id,{studio:true}),/only on the computer/);const child=f.children.findLast(c=>c.exitCode===null);assert.ok(child);child.kill();assert.equal((await finishJob(f.control,update.id)).state,'done');
+}finally{await f.cleanup();}});
 
 test('a model the person pointed at their own GGUF folder keeps that folder for the next load: setup is not asked to download it again (#3199)',async()=>{const f=nativeFixture();try{
  const own=join(f.directory,'my-ggufs');mkdirSync(own,{recursive:true});const shard=join(own,'Qwen3.8-Flash-Next-IQ2_XS-00001-of-00002.gguf');writeFileSync(shard,'x');

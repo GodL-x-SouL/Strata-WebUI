@@ -39,7 +39,7 @@ export function VersionPicker({ versions, selectedId, hardware, onSelect, onOwnG
   selectedId: string;
   hardware: FitHardware | null | undefined;
   onSelect: (id: string) => void;
-  onOwnGguf: () => void;
+  onOwnGguf?: () => void;
   /** The versions already on this computer (ready to load): each gets a small "Downloaded" tag. */
   downloaded?: ReadonlySet<string>;
   /** False where the recommended ones are shown elsewhere (the first-run page): the menu then holds only the others. */
@@ -112,7 +112,7 @@ export function VersionPicker({ versions, selectedId, hardware, onSelect, onOwnG
           {tr(foldedOpen ? <div className="version-more__rows">{tr(more.map(row))}</div> : null)}
         </div> : null)}
         <div className="version-foot">
-          <button role="menuitem" className="version-foot__btn" onClick={() => { setOpen(false); onOwnGguf(); }}><Icon name="folder" size={14}/>{tr("Use your own GGUF…")}</button>
+          {tr(onOwnGguf ? <button role="menuitem" className="version-foot__btn" onClick={() => { setOpen(false); onOwnGguf(); }}><Icon name="folder" size={14}/>{tr("Use your own GGUF…")}</button> : null)}
           <button role="menuitem" className="version-foot__btn" aria-pressed={details} onClick={() => setDetails(d => !d)}>{tr(details ? "Hide details" : "Show details")}</button>
         </div>
       </div>
